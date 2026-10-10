@@ -242,9 +242,12 @@ export class Store {
     kind: string,
     terms: Record<string, unknown>,
     ttlSeconds = 300,
+    expectedSessionGeneration?: number,
   ): Promise<Intent> {
     return this.transaction(async (c) => {
       const a = await this.getAccount(owner, accountId, c, true);
+      if (expectedSessionGeneration !== undefined && a.session_generation !== expectedSessionGeneration)
+        throw new DomainError("STALE_SESSION", "Browser session changed during preparation");
       if (!a.enabled)
         throw new DomainError(
           "ACCOUNT_DISCONNECTED",
@@ -291,7 +294,7 @@ export class Store {
     expectedDigest: string,
   ): Promise<void> {
     const { rowCount } = await this.pool.query(
-      `UPDATE intents SET approved_at=now() WHERE id=$1 AND owner_id=$2 AND digest=$3 AND expires_at>now() AND consumed_at IS NULL`,
+      `UPDATE intents AS i SET approved_at=now() WHERE i.id=$1 AND i.owner_id=$2 AND i.digest=$3 AND i.expires_at>now() AND i.consumed_at IS NULL AND EXISTS(SELECT 1 FROM accounts AS a WHERE a.id=i.account_id AND a.owner_id=i.owner_id AND a.enabled AND NOT a.quarantined AND a.session_generation=i.session_generation)`,
       [id, owner, expectedDigest],
     );
     if (!rowCount)

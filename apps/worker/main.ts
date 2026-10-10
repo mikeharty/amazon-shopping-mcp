@@ -56,6 +56,8 @@ const executor = new Executor(
   config.retainObservations,
   config.desktopNotifications,
   config.amazonReadOnly,
+  config.purchasingEnabled,
+  `http://127.0.0.1:${config.port}`,
 );
 const monitoring = new Monitoring(store);
 const notifications = new NotificationOutbox(

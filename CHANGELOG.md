@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0-alpha — 2026-10-10
+
+- Add an optional purchasing profile with Buy It Now preparation, cart checkout, purchase submission, and Subscribe & Save enrollment.
+- Connect exact browser-observed terms to the single-use owner approval journal and expose approval status without an MCP approval tool.
+- Recheck material terms and expiry before the final click; independently verify orders and subscription state; quarantine uncertain effects without replay.
+- Display charges, delivery, payment summaries, recurring commitments and local expiry times in the owner page, including mobile dark mode.
+- Preserve the 38-tool read-only profile. Transaction flows have synthetic browser, real MCP/Postgres and compiled Chromium coverage; live purchases remain unverified.
+
 ## 0.2.0-alpha — 2026-10-02
 
 - Add guided setup, private client configuration, and supervised foreground startup with sign-in recovery.

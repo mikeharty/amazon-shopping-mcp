@@ -39,6 +39,7 @@ export type ProviderContext = {
   accountRef: string;
   sessionGeneration: number;
   marketplace: "amazon.com";
+  intentExpiresAt?: string;
 };
 export type ProviderRead = (
   kind: string,

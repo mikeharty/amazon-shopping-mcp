@@ -7,7 +7,7 @@
 Research products, keep an eye on prices, and look up orders through an MCP client.
 Your account session stays in a dedicated local browser.
 
-[![Verify](https://github.com/mikeharty/amazon-mcp/actions/workflows/verify.yml/badge.svg?branch=main)](https://github.com/mikeharty/amazon-mcp/actions/workflows/verify.yml) [![Alpha](https://img.shields.io/badge/status-v0.2.0%20alpha-f59e0b?style=flat-square)](CHANGELOG.md) [![Node](https://img.shields.io/badge/Node-22.18%2B%20%7C%2024%20%7C%2026%2B-43853d?style=flat-square&logo=nodedotjs&logoColor=white)](#before-you-start) [![MIT license](https://img.shields.io/badge/license-MIT-2563eb?style=flat-square)](LICENSE) [![Local](https://img.shields.io/badge/runs-locally-0f766e?style=flat-square)](#quick-start) [![Read only](https://img.shields.io/badge/Amazon-read%20only%20by%20default-6366f1?style=flat-square)](#defaults-and-optional-features)
+[![Verify](https://github.com/mikeharty/amazon-mcp/actions/workflows/verify.yml/badge.svg?branch=main)](https://github.com/mikeharty/amazon-mcp/actions/workflows/verify.yml) [![Alpha](https://img.shields.io/badge/status-v0.3.0%20alpha-f59e0b?style=flat-square)](CHANGELOG.md) [![Node](https://img.shields.io/badge/Node-22.18%2B%20%7C%2024%20%7C%2026%2B-43853d?style=flat-square&logo=nodedotjs&logoColor=white)](#before-you-start) [![MIT license](https://img.shields.io/badge/license-MIT-2563eb?style=flat-square)](LICENSE) [![Local](https://img.shields.io/badge/runs-locally-0f766e?style=flat-square)](#quick-start) [![Read only](https://img.shields.io/badge/Amazon-read%20only%20by%20default-6366f1?style=flat-square)](#defaults-and-optional-features)
 
 [Quick start](#quick-start) · [Platform notes](#platform-notes) · [Connect a client](#connect-your-mcp-client) · [Troubleshooting](#troubleshooting) · [Development](#development)
 
@@ -29,7 +29,9 @@ Your account session stays in a dedicated local browser.
 | Recover a request | Find a durable operation handle after a client disconnect and retrieve its result. |
 
 The default read-only mode exposes **38 tools**. Explicitly enabling the existing
-cart adapters exposes 42. Local price alerts work in read-only mode.
+cart adapters exposes 42; enabling purchasing exposes 48. Local price alerts work
+in read-only mode. [Purchase workflows](docs/PURCHASING.md) cover Buy It Now, cart
+checkout and Subscribe & Save enrollment with exact-term owner approval.
 
 Live reads have been observed for the cart, paginated order history, order details,
 split-shipment tracking, and subscriptions. Other page paths and all cart writes
@@ -230,7 +232,8 @@ may still finish.
 | Setting | Default | What changes when enabled |
 | --- | --- | --- |
 | `AMAZON_LIVE_ENABLED` | `false` | Lets the worker browse Amazon after dedicated login and source-access review. |
-| `AMAZON_READ_ONLY` | `true` | Setting this to `false` in both services enables four existing cart adapters. Their live behavior remains unverified. |
+| `AMAZON_READ_ONLY` | `true` | Setting this to `false` in both services enables cart adapters and permits explicitly enabled purchase tools. Live mutation behavior remains unverified. |
+| `AMAZON_PURCHASING_ENABLED` | `false` | With write access enabled, exposes Buy It Now, checkout submission and Subscribe & Save enrollment. Every submission requires an exact-term approval in the owner page. |
 | `AMAZON_HEADLESS` | `true` | Setting this to `false` shows the worker browser. The login window is always visible. |
 | `RETAIN_OBSERVATIONS` | `false` | Keeps observations collected by this installation for product history. It cannot recover earlier prices. |
 | `KEEPA_ENABLED` | `false` | Enables the optional paid provider when an existing `KEEPA_API_KEY` is also configured. |
@@ -242,9 +245,11 @@ computer wakeup. Keepa call/token limits apply per gateway process and reset on
 restart. Unknown provider charges cannot be guaranteed in advance. The Creators
 API integration is not implemented.
 
-Checkout snapshots are available for review. Automated purchase submission,
-returns, cancellations, subscription changes, and review publishing are not
-exposed. `content_draft` saves supplied text for your review and never publishes
+Checkout snapshots are available in read-only mode. The optional purchasing
+profile adds reviewed one-time orders and Subscribe & Save enrollment. Purchase
+and enrollment adapters are fixture-verified; no live purchase was made during
+verification. Returns, cancellations, existing-subscription changes, and review
+publishing are not exposed. `content_draft` saves supplied text for your review and never publishes
 it. Cart adapters require exact line identity and check their result; an
 ambiguous write quarantines later writes until an operator reconciles it.
 

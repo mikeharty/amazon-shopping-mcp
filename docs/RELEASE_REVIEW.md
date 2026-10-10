@@ -1,6 +1,20 @@
 # Private alpha review
 
-Review target: `v0.2.0-alpha`, prepared October 2, 2026 (America/Los_Angeles).
+Review target: `v0.3.0-alpha`, prepared October 10, 2026 (America/Los_Angeles).
+
+## Version 0.3.0 local verification
+
+Local verification on Node 26.10.0 passed typecheck, **221 tests in 22 files**
+with isolated Postgres suites enabled, the production build, and **14 compiled
+Chromium fixture checks** (8 account reads, 1 password flow, 2 research/history
+workflows, and 3 purchase flows). The isolated supervisor check retained **38
+read-only tools**, rejected a duplicate launch, and shut down cleanly.
+
+The new HTTP/MCP/Postgres tests verify preparation, actual owner-page approval,
+concurrent submission deduplication, ownership/scope/action boundaries, changed
+recurring terms, disabled purchasing, and persisted uncertainty quarantine. Owner
+review was visually checked at desktop/light and mobile/dark sizes. These are
+local synthetic purchase results, not current CI or live Amazon mutation evidence.
 
 ## Version 0.2.0 local verification
 
@@ -66,8 +80,10 @@ recorded in `docs/evidence/browser.md`; they are snapshots of specific runs, not
 a promise of current page compatibility. CI exercises synthetic browser pages,
 real isolated Postgres databases, MCP transport, and compiled JavaScript.
 
-Cart writes remain fixture-verified. Purchase submission, cancellations, returns,
-and subscription mutations are not exposed as automated actions. There is no
+Cart writes, purchase submission, and Subscribe & Save enrollment are
+fixture-verified. The transaction profile requires single-use owner approval;
+no real order or enrollment was used as a verification action. Cancellations,
+returns, and existing-subscription changes remain unsupported. There is no
 hosted OAuth server or supported multi-user deployment. Optional OS notification
 display and every desktop MCP client UI have not been verified.
 

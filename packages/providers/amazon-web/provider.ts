@@ -12,6 +12,8 @@ import {
 } from "../../browser-runtime/index.js";
 import { extractCart } from "./cart/index.js";
 import { extractCheckout, prepareCheckout } from "./checkout/index.js";
+import { buyingOptions, preparePurchase, readPurchasePreconditions, submitPurchase } from "./checkout/purchasing.js";
+import { purchaseCommitKinds } from "../../core/purchasing.js";
 import {
   extractCategory,
   extractMedia,
@@ -85,6 +87,17 @@ export class AmazonWebProvider implements ShoppingProvider {
     input: Record<string, unknown>,
     context: ProviderContext,
   ): Promise<Result> {
+    if (["buying_options_get", "purchase_checkout_prepare", "purchase_buy_now_prepare", "purchase_subscriptions_prepare", "checkout_submit_preconditions", "subscriptions_submit_preconditions"].includes(kind)) {
+      if (this.runner.sessionGeneration !== undefined && this.runner.sessionGeneration !== context.sessionGeneration)
+        return staleSession(this.runner.sessionGeneration);
+      try {
+        return await this.runner.run(async (page) => {
+          if (kind === "buying_options_get") return buyingOptions(page, input.asin);
+          if (kind.endsWith("_preconditions")) return readPurchasePreconditions(page, input);
+          return preparePurchase(page, kind.slice("purchase_".length), input, context);
+        });
+      } catch (error) { return mapError(error); }
+    }
     if (
       !AMAZON_WEB_READ_KINDS.includes(
         kind as (typeof AMAZON_WEB_READ_KINDS)[number],
@@ -256,7 +269,7 @@ export class AmazonWebProvider implements ShoppingProvider {
     context: ProviderContext,
   ): Promise<Result> {
     if (
-      !AMAZON_WEB_MUTATION_KINDS.includes(
+      !(purchaseCommitKinds as readonly string[]).includes(kind) && !AMAZON_WEB_MUTATION_KINDS.includes(
         kind as (typeof AMAZON_WEB_MUTATION_KINDS)[number],
       )
     )
@@ -268,6 +281,7 @@ export class AmazonWebProvider implements ShoppingProvider {
       return staleSession(this.runner.sessionGeneration);
     try {
       return await this.runner.run(async (page) => {
+        if ((purchaseCommitKinds as readonly string[]).includes(kind)) return submitPurchase(page, kind, terms, context);
         if (kind === "cart_add") return this.addToCart(page, terms, context);
         await gotoAndCheck(page, "https://www.amazon.com/gp/cart/view.html");
         const before = await extractCart(page);

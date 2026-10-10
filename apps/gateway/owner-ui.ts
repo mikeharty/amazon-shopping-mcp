@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { Store } from "../../packages/store/index.js";
 import { secureEqual } from "../../packages/store/crypto.js";
 import { DomainError } from "../../packages/contracts/index.js";
+import { purchaseTermsSchema, type PurchaseTerms } from "../../packages/core/purchasing.js";
 type Session = { csrf: string; expires: number };
 const escape = (v: unknown) =>
   String(v)
@@ -10,8 +11,13 @@ const escape = (v: unknown) =>
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+const localTime = (value: Date) => new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(value);
+const dollars = (value: { minorUnits: number; currency: string }) => new Intl.NumberFormat("en-US", { style: "currency", currency: value.currency }).format(value.minorUnits / 100);
+function purchaseReview(terms: PurchaseTerms) {
+  return `<h2>${terms.recurring ? "Subscribe &amp; Save enrollment" : "One-time purchase"}</h2><ul>${terms.lines.map((line) => `<li><strong>${escape(line.title)}</strong> (${escape(line.asin)}) — ${line.quantity} × ${dollars(line.unitPrice)}<br>Seller: ${line.sellerName ? `${escape(line.sellerName)} (${escape(line.sellerId)})` : escape(line.sellerId)}; condition: ${escape(line.condition)}</li>`).join("")}</ul><p>Items: ${dollars(terms.subtotal)} · shipping: ${dollars(terms.shipping)} · tax: ${dollars(terms.tax)} · discounts: ${dollars(terms.discount)}</p><p><strong>${terms.recurring && !terms.recurring.createsImmediateOrder ? "First delivery estimate" : "Total charged for this order"}: ${dollars(terms.total)}</strong></p><p>Deliver to: ${escape(terms.address.summary)}<br>Payment: ${escape(terms.payment.summary)}</p><ul>${terms.shippingGroups.map((group) => `<li>${escape(group.delivery)} — ${escape(group.speed)}</li>`).join("")}</ul>${terms.recurring ? `<h2>Recurring commitment</h2><p><strong>This enrolls you in automatic recurring deliveries.</strong></p><p>Schedule: ${escape(terms.recurring.frequency)}<br>Next delivery: ${escape(terms.recurring.nextDelivery)}<br>Displayed discount: ${escape(terms.recurring.discount)}<br>${escape(terms.recurring.futurePricePolicy)}</p><p>${terms.recurring.createsImmediateOrder ? "This approval also places the initial order at the total above." : "This approval enrolls the subscription without placing an immediate order."}</p>` : ""}${terms.promotions.length ? `<p>Promotions: ${terms.promotions.map(escape).join("; ")}</p>` : ""}${terms.warnings.length ? `<p>Amazon notices: ${terms.warnings.map(escape).join("; ")}</p>` : ""}`;
+}
 const page = (body: string) =>
-  `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Amazon MCP owner control</title><style>body{font:1rem/1.6 system-ui;max-width:52rem;margin:3rem auto;padding:1rem;color:#17202a;background:#fafafa}input,button{box-sizing:border-box;font:inherit;padding:.75rem;min-height:48px}label{display:block;margin-top:1rem}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eee;padding:1rem}a{color:#0645ad}:focus-visible{outline:3px solid #0366d6}button{cursor:pointer}</style><main>${body}</main></html>`;
+  `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Amazon MCP owner control</title><style>:root{color-scheme:light dark;--background:#fafafa;--foreground:#17202a;--panel:#eee;--link:#0645ad}@media(prefers-color-scheme:dark){:root{--background:#15191f;--foreground:#e9edf2;--panel:#252b33;--link:#a5c8ff}}body{font:1rem/1.6 system-ui;max-width:52rem;margin:3rem auto;padding:1rem;color:var(--foreground);background:var(--background);overflow-wrap:anywhere}input,button{box-sizing:border-box;font:inherit;padding:.75rem;min-height:48px;max-width:100%}label{display:block;margin-top:1rem}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--panel);padding:1rem}a{color:var(--link)}:focus-visible{outline:3px solid #5a9eff}button{cursor:pointer}li{margin-bottom:.75rem}@media(max-width:600px){body{margin:1rem auto}}</style><main>${body}</main></html>`;
 function html(
   body: string,
   status = 200,
@@ -143,9 +149,10 @@ export function createOwnerUi(
             '<h1>Intent approved</h1><p>The approval is single-use and expires with the displayed terms. Return to your assistant to submit it.</p><a href="/owner">Account status</a>',
           );
         }
-        return html(
-          `<h1>Review ${escape(intent.kind)}</h1><p>Expires ${escape(intent.expires_at.toISOString())}. Review the exact terms before authorizing.</p><pre>${escape(JSON.stringify(intent.terms, null, 2))}</pre><form method="post" action="${escape(url.pathname)}"><input type="hidden" name="csrf" value="${session.csrf}"><input type="hidden" name="digest" value="${intent.digest}"><input type="hidden" name="action" value="approve"><button type="submit">Approve these exact terms once</button></form><p><a href="/owner">Leave without approving</a></p>`,
-        );
+        const parsed = purchaseTermsSchema.safeParse(intent.terms);
+        const account = await store.getAccount(config.ownerId, intent.account_id);
+        const active = intent.expires_at > new Date() && !intent.consumed_at && account.enabled && !account.quarantined && account.session_generation === intent.session_generation;
+        return html(`<h1>Review ${parsed.success ? (parsed.data.recurring ? "this subscription" : "this purchase") : escape(intent.kind)}</h1><p>Expires ${escape(localTime(intent.expires_at))}. Review the exact terms before authorizing.</p>${parsed.success ? purchaseReview(parsed.data) : `<pre>${escape(JSON.stringify(intent.terms, null, 2))}</pre>`}${active ? `<form method="post" action="${escape(url.pathname)}"><input type="hidden" name="csrf" value="${session.csrf}"><input type="hidden" name="digest" value="${intent.digest}"><input type="hidden" name="action" value="approve"><button type="submit">Approve these exact terms once</button></form>` : "<p>This approval is unavailable or already consumed. Prepare fresh terms after resolving any account issue.</p>"}<p><a href="/owner">Leave without approving</a></p>`);
       }
       const a = await store.account(config.ownerId);
       const health = await store.workerHealth();

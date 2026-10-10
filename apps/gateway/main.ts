@@ -19,6 +19,7 @@ const registry = createRegistry(store, {
   desktopNotifications: config.desktopNotifications,
   readKinds: [...AMAZON_WEB_READ_KINDS],
   writeSchemas: config.amazonReadOnly ? {} : cartWriteSchemas,
+  purchasingEnabled: config.purchasingEnabled,
   keepa: createKeepaProvider({
     apiKey: config.keepaKey,
     maxCallsPerSession: config.keepaCalls,

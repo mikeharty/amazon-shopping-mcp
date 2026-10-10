@@ -10,6 +10,7 @@ export type Config = {
   browserHeadless: boolean;
   liveEnabled: boolean;
   amazonReadOnly: boolean;
+  purchasingEnabled: boolean;
   retainObservations: boolean;
   keepaKey?: string;
   keepaCalls: number;
@@ -62,6 +63,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     browserHeadless: headless === "true",
     liveEnabled: env.AMAZON_LIVE_ENABLED === "true",
     amazonReadOnly: env.AMAZON_READ_ONLY !== "false",
+    purchasingEnabled: env.AMAZON_PURCHASING_ENABLED === "true" && env.AMAZON_READ_ONLY === "false",
     retainObservations: env.RETAIN_OBSERVATIONS === "true",
   };
 }

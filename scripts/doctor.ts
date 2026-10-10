@@ -10,7 +10,7 @@ const resultSchema = z.object({ status: z.literal("ok"), data: z.object({
   queue: z.object({ queued: z.number(), active: z.number(), uncertain: z.number(), staleActive: z.number() }),
   issues: z.array(z.object({ code: z.string(), action: z.string() })),
 }) });
-const client = new Client({ name: "amazon-local-doctor", version: "0.2.0-alpha" }, { versionNegotiation: { mode: "auto" } });
+const client = new Client({ name: "amazon-local-doctor", version: "0.3.0-alpha" }, { versionNegotiation: { mode: "auto" } });
 try {
   if (!Number.isInteger(port) || port < 1024 || port > 65535 || !process.env.MCP_TOKEN) throw new Error();
   await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), {

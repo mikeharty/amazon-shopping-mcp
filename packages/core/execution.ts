@@ -7,6 +7,7 @@ import {
 } from "./observations.js";
 import { searchOrders, researchProducts } from "./shopping-workflows.js";
 import { digest } from "../store/crypto.js";
+import { commitKindFor, purchaseCommitKinds, purchasePreparationKinds, purchaseTermsSchema } from "./purchasing.js";
 export class Executor {
   constructor(
     readonly store: Store,
@@ -15,12 +16,22 @@ export class Executor {
     readonly retainObservations = false,
     readonly desktopNotifications = false,
     readonly amazonReadOnly = false,
+    readonly purchasingEnabled = false,
+    readonly reviewOrigin = "http://127.0.0.1:3433",
   ) {}
   async run(id: string): Promise<void> {
     const op = await this.store.claim(id, this.workerId);
     if (!op) return;
     if (this.amazonReadOnly && op.mode !== "read") {
       await this.store.finish(op, this.workerId, { status: "failed", error: { code: "AMAZON_READ_ONLY", retryable: false } });
+      return;
+    }
+    if ((purchaseCommitKinds as readonly string[]).includes(op.kind) && (!this.purchasingEnabled || this.amazonReadOnly)) {
+      await this.store.finish(op, this.workerId, { status: "failed", error: { code: "PURCHASING_DISABLED", retryable: false } });
+      return;
+    }
+    if ((purchaseCommitKinds as readonly string[]).includes(op.kind) && op.mode !== "commit") {
+      await this.store.finish(op, this.workerId, { status: "failed", error: { code: "OWNER_APPROVED_INTENT_REQUIRED", retryable: false } });
       return;
     }
     let dispatched = false;
@@ -31,15 +42,29 @@ export class Executor {
         accountRef: op.account_id,
         marketplace: account.marketplace,
         sessionGeneration: account.session_generation,
+        intentExpiresAt: undefined as string | undefined,
       };
       let result: Result;
-      if (op.mode === "read")
+      if (this.purchasingEnabled && !this.amazonReadOnly && (purchasePreparationKinds as readonly string[]).includes(op.kind)) {
+        result = await this.provider.read(`purchase_${op.kind}`, op.input, ctx);
+        if (result.status === "ok") {
+          const payload = result.data as { purchaseTerms?: unknown; commitKind?: unknown } | undefined;
+          const terms = purchaseTermsSchema.safeParse(payload?.purchaseTerms);
+          if (!terms.success || result.observation?.authentication !== "verified" || payload?.commitKind !== commitKindFor(terms.data)) {
+            result = { status: "unsupported", error: { code: "PURCHASE_TERMS_UNVERIFIED", retryable: false } };
+          } else {
+            const intent = await this.store.prepare(op.owner_id, op.account_id, commitKindFor(terms.data), terms.data, 300, ctx.sessionGeneration);
+            result = { ...result, data: { intentId: intent.id, terms: intent.terms, termsDigest: intent.digest, expiresAt: intent.expires_at.toISOString(), reviewUrl: `${this.reviewOrigin}/owner/intents/${intent.id}`, approved: false }, action: { kind: "owner_purchase_review", url: `${this.reviewOrigin}/owner/intents/${intent.id}`, expiresAt: intent.expires_at.toISOString() } };
+          }
+        }
+      } else if (op.mode === "read")
         result = op.kind === "orders_search" ? await searchOrders(this.provider, op.input, ctx)
           : op.kind === "products_research" ? await researchProducts(this.provider, op.input, ctx)
           : await this.provider.read(op.kind, op.input, ctx);
       else {
         if (op.mode === "commit") {
           const intent = await this.store.getIntent(op.owner_id, op.intent_id!);
+          ctx.intentExpiresAt = intent.expires_at.toISOString();
           if (
             intent.session_generation !== account.session_generation ||
             intent.expires_at <= new Date()

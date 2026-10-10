@@ -15,6 +15,7 @@ import { SERVER_INSTRUCTIONS, WORKFLOW_GUIDE } from "./guide.js";
 import { productHistorySubject } from "../../packages/core/observations.js";
 import { prepareUserDraft } from "../../packages/core/action-proposals.js";
 import { compareOffers } from "../../packages/core/comparison.js";
+import { purchaseCommitKinds } from "../../packages/core/purchasing.js";
 import type { KeepaProvider } from "../../packages/providers/keepa/index.js";
 import type { ToolDefinition, ResourceDefinition } from "./transport.js";
 const account = { accountRef: z.uuid() };
@@ -87,6 +88,17 @@ export const readSchemas: Record<string, z.ZodType> = {
 };
 const revision = z.string().min(1).max(64);
 const lineRef = z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/);
+const exactProduct = {
+  ...account, idempotencyKey, asin,
+  quantity: z.number().int().min(1).max(10),
+  expectedSellerId: z.string().regex(/^[A-Z0-9]{6,32}$/),
+  expectedCondition: z.string().trim().min(1).max(80),
+};
+export const purchasePreparationSchemas: Record<string, z.ZodType> = {
+  checkout_prepare: z.object({ ...account, idempotencyKey, url: z.url().max(2048).optional(), expectedRevision: revision }).strict(),
+  buy_now_prepare: z.object(exactProduct).strict(),
+  subscriptions_prepare: z.object({ ...exactProduct, frequency: z.string().min(1).max(120) }).strict(),
+};
 export const cartWriteSchemas: Record<string, z.ZodType> = {
   cart_add: z
     .object({
@@ -143,6 +155,7 @@ export function createRegistry(
     keepa?: KeepaProvider;
     desktopNotifications?: boolean;
     fetchImage?: typeof fetchProductImage;
+    purchasingEnabled?: boolean;
   },
 ) {
   const monitoring = new Monitoring(store);
@@ -227,10 +240,12 @@ export function createRegistry(
           creatorsEnabled: false,
           keepaEnabled: options.keepa?.enabled ?? false,
           retainsObservations: options.retainObservations,
-          readTools: [...new Set([...(options.readKinds ?? Object.keys(readSchemas)), "orders_search", "products_research"])],
-          writeTools: Object.keys(options.writeSchemas ?? {}),
+          readTools: [...new Set([...(options.readKinds ?? Object.keys(readSchemas)).filter((kind) => !options.purchasingEnabled || kind !== "checkout_prepare"), "orders_search", "products_research", ...(options.purchasingEnabled ? ["buying_options_get", "purchase_intent_get"] : [])])],
+          writeTools: [...Object.keys(options.writeSchemas ?? {}), ...(options.purchasingEnabled ? [...purchaseCommitKinds, "buy_now_prepare", "subscriptions_prepare"] : [])],
+          purchasingEnabled: options.purchasingEnabled ?? false,
+          preparationTools: options.purchasingEnabled ? Object.keys(purchasePreparationSchemas) : [],
           consequentialActions:
-            "not exposed; internal proposal validation only",
+            options.purchasingEnabled ? "exact-term owner approval required; fixture-verified purchase adapters; no live purchase verification" : "not exposed; internal proposal validation only",
           publicReadEvidence: {
             date: "2026-09-22",
             scope:
@@ -242,6 +257,7 @@ export function createRegistry(
     },
   );
   for (const kind of [...new Set([...(options.readKinds ?? Object.keys(readSchemas)), "orders_search", "products_research"])]) {
+    if (kind === "checkout_prepare" && options.purchasingEnabled) continue;
     const schema = readSchemas[kind];
     if (!schema) throw new Error(`No input schema for ${kind}`);
     add(
@@ -277,6 +293,47 @@ export function createRegistry(
         return { status: "pending", operationId: op.id };
       },
     );
+  }
+  if (options.purchasingEnabled) {
+    add("buying_options_get", "Read exact product identity, seller, condition and observed purchase modes/frequency values. This does not buy or subscribe. Poll operations_get.", z.object({ ...account, asin }).strict(), "account:read", true, async (input, owner) => {
+      await store.getAccount(owner.id, String(input.accountRef));
+      if (!options.liveEnabled) return { status: "requires_user_action", error: { code: "LIVE_ACCESS_DISABLED", retryable: false } };
+      const op = await store.start(owner.id, String(input.accountRef), "buying_options_get", "read", { asin: input.asin }, randomUUID());
+      return { status: "pending", operationId: op.id };
+    });
+    for (const [kind, schema] of Object.entries(purchasePreparationSchemas)) {
+      add(kind, kind === "subscriptions_prepare"
+        ? "Prepare Subscribe & Save enrollment for one exact item and observed frequency. Returns a durable operation and a private owner review link. Recurring terms and any immediate order must be approved; this never confirms enrollment."
+        : "Prepare exact checkout terms and a private owner approval link. Buy It Now enters a review page without placing an order. For cart checkout omit url and use cart_get revision; for an existing review supply url and checkout_get revision. Preserve one idempotency key; poll operations_get.",
+      schema, kind === "subscriptions_prepare" ? "subscriptions:write" : "checkout:prepare", false, async (input, owner) => {
+        const { accountRef, idempotencyKey: key, ...args } = input;
+        await store.getAccount(owner.id, String(accountRef));
+        if (!options.liveEnabled) return { status: "requires_user_action", error: { code: "LIVE_ACCESS_DISABLED", retryable: false } };
+        const op = await store.start(owner.id, String(accountRef), kind, kind === "checkout_prepare" ? "read" : "write", args, String(key));
+        return { status: "pending", operationId: op.id };
+      });
+    }
+    add("purchase_intent_get", "Read an owner-bound purchase or subscription intent, approval status and exact terms. This cannot approve an intent.", z.object({ ...account, intentId: z.uuid() }).strict(), "account:read", true, async (input, owner) => {
+      const intent = await store.getIntent(owner.id, String(input.intentId));
+      await store.getAccount(owner.id, String(input.accountRef));
+      if (intent.account_id !== input.accountRef || !(purchaseCommitKinds as readonly string[]).includes(intent.kind)) throw new DomainError("NOT_FOUND", "Purchase intent not found", 404);
+      return { status: "ok", data: { intentId: intent.id, kind: intent.kind, terms: intent.terms, termsDigest: intent.digest, approved: Boolean(intent.approved_at), consumed: Boolean(intent.consumed_at), expiresAt: intent.expires_at.toISOString(), reviewUrl: `${options.origin}/owner/intents/${intent.id}` } };
+    });
+    for (const kind of purchaseCommitKinds) {
+      add(kind, "Submit exactly one current owner-approved intent. The owner approves through the private review page; a caller boolean is never approval. Changed terms stop submission. Unknown outcomes quarantine later writes and must never be retried with another intent. Poll operations_get.", z.object({ ...account, intentId: z.uuid(), idempotencyKey }).strict(), kind === "subscriptions_submit" ? "subscriptions:write" : "checkout:commit", false, async (input, owner) => {
+        const intent = await store.getIntent(owner.id, String(input.intentId));
+        await store.getAccount(owner.id, String(input.accountRef));
+        if (intent.account_id !== input.accountRef || intent.kind !== kind) throw new DomainError("INTENT_MISMATCH", "Intent does not match this account or action");
+        if (!options.liveEnabled) return { status: "requires_user_action", error: { code: "LIVE_ACCESS_DISABLED", retryable: false } };
+        const op = await store.submit(owner.id, intent.id, String(input.idempotencyKey));
+        return { status: "pending", operationId: op.id };
+      });
+    }
+    for (let index = 0; index < tools.length; index++) {
+      const tool = tools[index]!;
+      if ([...Object.keys(purchasePreparationSchemas), ...purchaseCommitKinds, "purchase_intent_get"].includes(tool.name))
+        tools[index] = { ...tool, annotations: { ...tool.annotations, idempotentHint: true, ...(tool.name === "purchase_intent_get" ? { openWorldHint: false } : {}) } };
+    }
   }
   for (const [kind, schema] of Object.entries(options.writeSchemas ?? {}))
     add(

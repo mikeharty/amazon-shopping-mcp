@@ -18,7 +18,7 @@ if (
     "Set PORT and MCP_TOKEN in the private .env before verification",
   );
 const client = new Client(
-  { name: "amazon-read-smoke", version: "0.2.0-alpha" },
+  { name: "amazon-read-smoke", version: "0.3.0-alpha" },
   { versionNegotiation: { mode: "auto" } },
 );
 try {

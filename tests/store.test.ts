@@ -136,7 +136,7 @@ describe.skipIf(!connection)("Postgres durable operations", () => {
       },
       close: async () => {},
     };
-    await new Executor(store, provider, "tester").run(op.id);
+    await new Executor(store, provider, "tester", false, false, false, true).run(op.id);
     expect(effects).toBe(0);
     expect((await store.getOperation("terms", op.id)).status).toBe("conflict");
   });
