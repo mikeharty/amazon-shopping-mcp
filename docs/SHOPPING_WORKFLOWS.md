@@ -94,7 +94,16 @@ JSON preserves the original observed text. Invoice downloads remain unsupported.
 
 ## Setup and session recovery
 
-After cloning, run `pnpm run local:setup`, then `pnpm run local:start`. Setup
+After cloning, run `npx --yes pnpm@10.32.1 run local:onboard`. It guides access
+selection, installation, visible Amazon sign-in, startup and verified discovery.
+Choose read-only shopping to begin; purchasing still needs a separate exact-term
+owner approval for each order. On macOS it offers a background service that starts
+at login. `local:service status|stop|start|restart` manages that service from its
+installing checkout. Stop it before `browser:login` for session recovery, then
+start it and run `local:doctor`. An existing running gateway is checked without
+changing its configuration or starting another browser.
+
+For installation only, run `pnpm run local:setup`, then `pnpm run local:start`. Setup
 installs locked dependencies and Chromium, creates secrets only if absent, starts
 the Compose Postgres service, builds, migrates, and writes a private client
 configuration under `.local/`. On Linux, browser dependencies may require system
@@ -122,7 +131,20 @@ configuration formats and image rendering vary by client. The owner token is
 never included. SDK compatibility and image content were tested; every desktop
 client UI has not been verified.
 
-For Codex CLI, the installed CLI supports:
+For Codex CLI, the simplest connection is:
+
+```sh
+pnpm run local:codex
+```
+
+The launcher reads the private token and supplies it in the child environment.
+It configures `amazon_local` for that invocation, disabling an older `amazon`
+entry for that session to avoid duplicate tools and stale manual headers. It
+does not edit global settings. Refresh the connection or start a new client
+session after changing the tool profile. Other desktop clients still import the
+generated private configuration into their own settings.
+
+For manual permanent Codex CLI registration, the installed CLI supports:
 
 ```sh
 codex mcp add amazon --url http://127.0.0.1:3433/mcp --bearer-token-env-var MCP_TOKEN

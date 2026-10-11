@@ -92,6 +92,7 @@ try {
   console.log(
     "Gateway and worker ready. Ctrl-C stops both. For session recovery, stop this command and run pnpm run local:start --login.",
   );
+  process.send?.({ type: "ready" });
 } catch {
   console.error(
     "Local services could not start. Check the database, port, and dedicated profile ownership; no locks were removed.",

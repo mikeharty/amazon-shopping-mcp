@@ -1,7 +1,10 @@
 # Buy It Now, checkout and Subscribe & Save
 
-Purchasing is available in the optional transaction profile. Fresh installations
-remain read-only. Enable both settings in the gateway and worker and restart:
+Purchasing is available in the optional transaction profile. The guided
+`pnpm run local:onboard` command offers purchasing as an explicit choice and
+configures the gateway and worker together. Read-only is the recommended default.
+Stop a running service before rerunning onboarding to change access mode.
+For manual configuration, enable both settings and restart:
 
 ```dotenv
 AMAZON_READ_ONLY=false

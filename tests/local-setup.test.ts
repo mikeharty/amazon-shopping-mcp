@@ -65,14 +65,27 @@ describe.each(["native", "javascript"] as const)("%s pnpm setup", (kind) => {
     expect(result.error).toBeUndefined();
     expect(result.status, result.stderr).toBe(0);
     expect(result.calls).toEqual(steps);
-    expect(result.stdout).toContain("Setup complete.");
+    expect(result.stdout).toContain("Installation complete.");
+    expect(result.stdout).toContain("Gateway and worker have not been started");
   });
 
   it("stops after a failed build without migrating or reporting success", () => {
     const result = runSetup(kind, "run build");
     expect(result.status).toBe(1);
     expect(result.calls).toEqual(steps.slice(0, 4));
-    expect(result.stderr).toContain("Setup stopped.");
-    expect(result.stdout).not.toContain("Setup complete.");
+    expect(result.stderr).toContain("Setup stopped at: Build application.");
+    expect(result.stdout).not.toContain("Installation complete.");
   });
+});
+
+it("stops before installing dependencies when Docker is not running", () => {
+  if (process.platform === "win32") return;
+  const cwd = mkdtempSync(join(tmpdir(), "amazon Docker preflight "));
+  try {
+    writeFileSync(join(cwd, "docker"), `#!${process.execPath}\nprocess.exit(process.argv[2] === 'compose' ? 0 : 1);\n`, { mode: 0o700 });
+    const result = spawnSync(process.execPath, [setup], { cwd, env: { ...process.env, PATH: `${cwd}:${process.env.PATH}`, npm_execpath: join(cwd, "should-not-run.cjs") }, encoding: "utf8" });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Docker is not running. Open Docker Desktop");
+    expect(result.stdout).not.toContain("Install locked dependencies");
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
 });

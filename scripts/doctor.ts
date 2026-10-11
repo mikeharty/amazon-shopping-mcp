@@ -18,14 +18,20 @@ try {
   }), { timeout: 10_000 });
   const response = await client.callTool({ name: "amazon_diagnostics", arguments: {} }, { timeout: 10_000 });
   const { data } = resultSchema.parse(response.structuredContent);
-  if (process.argv.includes("--json")) console.log(JSON.stringify(data, null, 2));
+  const readiness = process.argv.includes("--allow-offline") && !data.liveEnabled && data.worker.online && data.issues.every((issue) => issue.code === "live_disabled")
+    ? "available" : data.readiness;
+  if (process.argv.includes("--json")) console.log(JSON.stringify({ ...data, readiness }, null, 2));
   else {
-    console.log(`${data.sampledAt} Local service: ${data.readiness}; worker: ${data.worker.online ? "online" : "offline"}; live browsing: ${data.liveEnabled ? "enabled" : "disabled"}.`);
+    const sampledAt = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "long" }).format(new Date(data.sampledAt));
+    console.log(`${sampledAt} Local service: ${readiness}; worker: ${data.worker.online ? "online" : "offline"}; live browsing: ${data.liveEnabled ? "enabled" : "disabled"}.`);
     console.log(`Jobs: ${data.queue.queued} queued, ${data.queue.active} active, ${data.queue.uncertain} uncertain.`);
-    for (const issue of data.issues) console.log(`${issue.code}: ${issue.action}`);
+    for (const issue of data.issues) {
+      if (readiness === "available" && issue.code === "live_disabled") console.log("Offline access selected; Amazon browsing is disabled.");
+      else console.log(`${issue.code}: ${issue.action}`);
+    }
     console.log("Amazon sign-in was not checked. No jobs were retried or Amazon pages accessed.");
   }
-  if (data.readiness !== "available") process.exitCode = 2;
+  if (readiness !== "available") process.exitCode = 2;
 } catch {
   console.error("Local diagnostics unavailable. Check the gateway, private MCP_TOKEN, database and account initialization. No private error details were logged.");
   process.exitCode = 1;

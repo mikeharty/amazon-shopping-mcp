@@ -23,9 +23,13 @@
     "mcp:smoke": "node --env-file=.env --import tsx scripts/mcp-smoke.ts",
     "amazon:smoke": "node --env-file=.env --import tsx scripts/amazon-read-smoke.ts",
     "local:setup": "node scripts/local-setup.mjs",
+    "local:onboard": "node scripts/local-onboard.mjs",
+    "local:service": "node scripts/local-service.mjs",
+    "local:codex": "node scripts/local-codex.mjs",
     "local:start": "pnpm run build && node --env-file=.env scripts/local-start.mjs",
     "client:config": "node --env-file=.env --import tsx scripts/client-config.ts",
-    "test:startup": "node scripts/local-start-smoke.mjs"
+    "test:startup": "node scripts/local-start-smoke.mjs",
+    "test:onboarding": "node scripts/local-onboard-smoke.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",

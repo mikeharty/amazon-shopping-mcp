@@ -76,6 +76,7 @@ jobs:
           test "$ready" = true
           pnpm run mcp:smoke
       - run: pnpm run test:startup
+      - run: pnpm run test:onboarding
       - run: pnpm audit --prod
 
   secrets:

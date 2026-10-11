@@ -2,6 +2,9 @@
 
 ## 0.3.0-alpha — 2026-10-10
 
+- Add `local:onboard` for access selection, installation, sign-in, startup and verified MCP readiness in one guided flow.
+- Add macOS background-service controls and a Codex CLI launcher that handles the private token without manual copying or global client configuration changes.
+- Check prerequisites before installing, name failed installation steps, preserve running services and distinguish installation from a verified first run.
 - Add an optional purchasing profile with Buy It Now preparation, cart checkout, purchase submission, and Subscribe & Save enrollment.
 - Connect exact browser-observed terms to the single-use owner approval journal and expose approval status without an MCP approval tool.
 - Recheck material terms and expiry before the final click; independently verify orders and subscription state; quarantine uncertain effects without replay.
