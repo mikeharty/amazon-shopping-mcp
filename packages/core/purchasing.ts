@@ -27,6 +27,7 @@ export const purchaseTermsSchema = z.object({
     purchaseMode: z.enum(["one_time", "subscribe_and_save"]),
   }).strict()).min(1).max(50),
   subtotal: money, shipping: money, tax: money, discount: money, total: money,
+  funding: z.object({ giftCardApplied: money, additionalAmountDue: money }).strict().optional(),
   address: identity, payment: identity,
   shippingGroups: z.array(z.object({ ref: text, delivery: text, speed: text, asins: z.array(z.string().regex(/^[A-Z0-9]{10}$/)).min(1).max(50) }).strict()).min(1).max(50),
   promotions: z.array(text).max(30), warnings: z.array(text).max(30),
@@ -40,6 +41,12 @@ export const purchaseTermsSchema = z.object({
     issue("The displayed checkout totals do not reconcile");
   if (terms.subtotal.minorUnits !== terms.lines.reduce((sum, line) => sum + line.unitPrice.minorUnits * line.quantity, 0))
     issue("The displayed line prices do not reconcile with the subtotal");
+  if (terms.funding) {
+    if (terms.flow === 'subscribe_and_save' || terms.recurring)
+      issue('Gift-card funding is supported only for one-time purchases');
+    if (terms.funding.giftCardApplied.minorUnits > terms.total.minorUnits || terms.funding.giftCardApplied.minorUnits + terms.funding.additionalAmountDue.minorUnits !== terms.total.minorUnits)
+      issue('The displayed gift-card funding and additional payment do not reconcile with the purchase total');
+  }
   if (terms.lines.some((line) => !terms.shippingGroups.some((group) => group.asins.includes(line.asin))))
     issue("Every item needs an observed delivery group");
   if (terms.shippingGroups.some((group) => group.asins.some((asin) => !terms.lines.some((line) => line.asin === asin))))

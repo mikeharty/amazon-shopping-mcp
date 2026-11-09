@@ -129,4 +129,47 @@ describe('Non-executable modern review diagnostics', () => {
     expect(JSON.stringify(result)).not.toContain('Discount');
     expect((result.data as {sections:{totals:{labelValues:unknown[]}}}).sections.totals.labelValues).toContainEqual({ label: 'Order total', value: '$0.00' });
   });
+  it('reads explicit AUI product routes, line-bound scalar enums, quantity stepper and hashed identities', async () => {
+    html = html.replace(/<a href="https:\/\/www.amazon.com\/dp\/[^>]+>Fixture cable<\/a>/, '<span data-url="/gp/product/B0FIXTURE1?token=SECRET_URL">Fixture cable</span>')
+      .replace('id="checkout-item-block-0"', 'id="checkout-item-block-0" data-line-item-id="SECRET_LINE"')
+      .replace('</article>', '<div data-pipeline-link-args=\'{"asin":"B0FIXTURE1","condition":"New","purchaseMode":"one_time","selectedOfferId":"SECRET_SELECTED_OFFER","unknownCredential":"SECRET_CREDENTIAL"}\'>Product control</div><div data-a-component="stepper" data-steppervalue="2" aria-label="Quantity">2</div></article>');
+    const result = await provider.read('checkout_get', { url }, ctx);
+    expect(result).toMatchObject({ status: 'partial', data: { executableTerms: false, sections: { items: [{
+      publicIdentity: [{ source: 'data-url_product_route', asin: 'B0FIXTURE1' }, { source: 'data-pipeline-link-args:asin', asin: 'B0FIXTURE1' }],
+      explicitEnumObservations: [{ source: 'data-pipeline-link-args:condition', value: 'New' }, { source: 'data-pipeline-link-args:purchaseMode', value: 'one_time' }],
+      quantityObservations: [{ source: 'visible_quantity_stepper_state_and_label', quantity: 2 }],
+      lineIdentityHashes: [{ source: 'data-line-item-id', sha256: createHash('sha256').update('SECRET_LINE').digest('hex') }],
+      selectedOfferHashes: [{ source: 'data-pipeline-link-args:selectedOfferId', sha256: createHash('sha256').update('SECRET_SELECTED_OFFER').digest('hex') }],
+    }] } } });
+    expect(JSON.stringify(result)).not.toMatch(/SECRET_|unknownCredential/);
+  });
+  it('exposes only recognized AUI field paths/types without promoting unbound enums or alternative offers', async () => {
+    html = html.replace(/<a href="https:\/\/www.amazon.com\/dp\/[^>]+>Fixture cable<\/a>/, '<span>Fixture cable</span>')
+      .replace('</article>', '<div data-postdata=\'{"condition":"New","purchaseMode":"one_time","offers":[{"asin":"B0OTHER001","condition":"Used"}],"secretKey":"SECRET_VALUE"}\'>Control</div><div data-getdata=\'{"price":{"amount":7.40,"currency":"USD"},"cvv":"SECRET_CVV"}\'>Other control</div></article>');
+    const result = await provider.read('checkout_get', { url }, ctx);
+    const item = (result.data as {sections:{items:Record<string,unknown>[]}}).sections.items[0]!;
+    expect(item.publicIdentity).toBeUndefined(); expect(item.explicitEnumObservations).toBeUndefined(); expect(item.selectedOfferHashes).toBeUndefined();
+    expect(item.auiState).toEqual(expect.arrayContaining([{ source: 'data-getdata', fields: [{ path: 'price', type: 'object' }, { path: 'price.amount', type: 'number' }, { path: 'price.currency', type: 'string' }] }]));
+    expect(JSON.stringify(result)).not.toMatch(/SECRET_|secretKey|cvv|B0OTHER001/);
+  });
+  it.each([
+    '<span data-url="https://evil.example/dp/B0OTHER001">Product</span>',
+    '<span data-url="/checkout/modify?asin=B0OTHER001">Product</span>',
+    '<span data-pipeline-link-args="not JSON asin B0OTHER001">Product</span>',
+    '<span style="display:none" data-pipeline-link-args=\'{"asin":"B0OTHER001"}\'>Product</span>',
+  ])('never invents public identity from unsafe, arbitrary or hidden AUI fields %#', async (fields) => {
+    html = html.replace(/<a href="https:\/\/www.amazon.com\/dp\/[^>]+>Fixture cable<\/a>/, '<span>Fixture cable</span>').replace('</article>', fields + '</article>');
+    const result = await provider.read('checkout_get', { url }, ctx);
+    expect((result.data as {sections:{items:Record<string,unknown>[]}}).sections.items[0]!.publicIdentity).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('B0OTHER001');
+  });
+  it.each([
+    '<div data-a-component="stepper" data-steppervalue="2" aria-label="Quantity">1</div>',
+    '<div data-a-component="stepper" data-steppervalue="2">2</div>',
+    '<div data-steppervalue="2" aria-label="Quantity">2</div>',
+  ])('requires recognized stepper state and agreeing visible quantity evidence %#', async (fields) => {
+    html = html.replace('</article>', fields + '</article>');
+    const result = await provider.read('checkout_get', { url }, ctx);
+    expect((result.data as {sections:{items:Record<string,unknown>[]}}).sections.items[0]!.quantityObservations).toBeUndefined();
+  });
 });
