@@ -15,10 +15,38 @@ const { runtime, provider } = createAmazonWebProvider({
 try {
   await runtime.start();
   let html = "";
+  let addressSelectionSmoke = false;
+  const modernAddress = await readFile(new URL('../tests/fixtures/checkout-addresses-modern.html', import.meta.url), 'utf8');
+  const appliedShipping = await readFile(new URL('../tests/fixtures/checkout-shipping-applied.html', import.meta.url), 'utf8');
   await runtime.run(async (page) => {
     // Every request is fulfilled locally; this check never accesses Amazon.
-    await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
+    await page.route("**/*", (route) => {
+      const path = new URL(route.request().url()).pathname;
+      const body = addressSelectionSmoke ? path.includes('order-history') ? '<span id="nav-link-accountList-nav-line-1">Hello, Fixture</span>' : path.endsWith('/review') ? appliedShipping : modernAddress : html;
+      return route.fulfill({ contentType: "text/html", body });
+    });
   });
+  html = await readFile(new URL('../tests/fixtures/checkout-addresses.html', import.meta.url), 'utf8');
+  const addressRead = await provider.read('checkout_addresses_get', { url: 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address' }, {
+    ownerId: 'fixture-owner', accountRef: 'fixture-account', marketplace: 'amazon.com', sessionGeneration: runtime.sessionGeneration,
+  });
+  assert.equal(addressRead.status, 'ok', 'Address read must run in compiled Chromium');
+  assert.equal(addressRead.data.addresses.length, 1);
+  assert.equal(addressRead.data.addresses[0].selected, true);
+  assert.doesNotMatch(JSON.stringify(addressRead), /fixture-private|fixture-secret/);
+  addressSelectionSmoke = true;
+  const addressContext = { ownerId: 'fixture-owner', accountRef: 'fixture-account', marketplace: 'amazon.com', sessionGeneration: runtime.sessionGeneration };
+  const addressUrl = 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address?isBuyNow=1&pipelineType=Chewbacca';
+  const modernSnapshot = await provider.read('checkout_addresses_get', { url: addressUrl }, addressContext);
+  assert.equal(modernSnapshot.status, 'ok');
+  const targetAddress = modernSnapshot.data.addresses[0];
+  const selectedAddress = await provider.mutate('checkout_address_select', { url: addressUrl, expectedRevision: modernSnapshot.data.revision, expectedContextFingerprint: modernSnapshot.data.contextFingerprint, expectedSessionGeneration: runtime.sessionGeneration, addressRef: targetAddress.addressRef, expectedFingerprint: targetAddress.fingerprint }, addressContext);
+  assert.equal(selectedAddress.status, 'ok', 'Compiled address selection must independently verify applied shipping');
+  assert.equal(selectedAddress.data.verification, 'saved_address_id_and_physical_destination');
+  assert.equal(selectedAddress.data.orderSubmitted, false);
+  const reconciledAddress = await provider.read('checkout_addresses_get', { url: addressUrl, reconcileCurrent: true }, addressContext);
+  assert.equal(reconciledAddress.status, 'ok');
+  addressSelectionSmoke = false;
   for (const [kind, fixture, collection] of [
     ["cart_get", "cart.html", "lines"],
     ["orders_list", "orders.html", "orders"],

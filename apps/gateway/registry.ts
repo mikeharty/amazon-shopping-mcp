@@ -240,8 +240,8 @@ export function createRegistry(
           creatorsEnabled: false,
           keepaEnabled: options.keepa?.enabled ?? false,
           retainsObservations: options.retainObservations,
-          readTools: [...new Set([...(options.readKinds ?? Object.keys(readSchemas)).filter((kind) => !options.purchasingEnabled || kind !== "checkout_prepare"), "orders_search", "products_research", ...(options.purchasingEnabled ? ["buying_options_get", "purchase_intent_get"] : [])])],
-          writeTools: [...Object.keys(options.writeSchemas ?? {}), ...(options.purchasingEnabled ? [...purchaseCommitKinds, "buy_now_prepare", "subscriptions_prepare"] : [])],
+          readTools: [...new Set([...(options.readKinds ?? Object.keys(readSchemas)).filter((kind) => !options.purchasingEnabled || kind !== "checkout_prepare"), "orders_search", "products_research", ...(options.purchasingEnabled ? ["buying_options_get", "purchase_intent_get", "checkout_addresses_get"] : [])])],
+          writeTools: [...Object.keys(options.writeSchemas ?? {}), ...(options.purchasingEnabled ? [...purchaseCommitKinds, "buy_now_prepare", "subscriptions_prepare", "checkout_address_select"] : [])],
           purchasingEnabled: options.purchasingEnabled ?? false,
           preparationTools: options.purchasingEnabled ? Object.keys(purchasePreparationSchemas) : [],
           consequentialActions:
@@ -295,6 +295,19 @@ export function createRegistry(
     );
   }
   if (options.purchasingEnabled) {
+    add("checkout_addresses_get", "Read existing saved addresses and layout evidence from an exact Amazon checkout address step. inspectCurrent=true is metadata only and never navigates. reconcileCurrent=true reads applied shipping identity on the current same-checkout address/review/payment stage using fresh authentication, without repeating selection or clearing quarantine. Modes are mutually exclusive. Owner-private result; no address edits. Poll operations_get.", z.object({ ...account, url: z.url().max(2048), inspectCurrent: z.boolean().optional(), reconcileCurrent: z.boolean().optional() }).strict().refine((value) => !(value.inspectCurrent && value.reconcileCurrent), 'Choose one read mode'), "account:read", true, async (input, owner) => {
+      await store.getAccount(owner.id, String(input.accountRef));
+      if (!options.liveEnabled) return { status: "requires_user_action", error: { code: "LIVE_ACCESS_DISABLED", retryable: false } };
+      const op = await store.start(owner.id, String(input.accountRef), "checkout_addresses_get", "read", { url: input.url, ...(input.inspectCurrent !== undefined ? { inspectCurrent: input.inspectCurrent } : {}), ...(input.reconcileCurrent !== undefined ? { reconcileCurrent: input.reconcileCurrent } : {}) }, randomUUID());
+      return { status: "pending", operationId: op.id };
+    });
+    add('checkout_address_select', 'Select one exact existing saved shipping address from a fresh checkout snapshot and continue through the verified address control. This never creates/edits/defaults an address, approves terms, creates an intent or submits an order. Preserve one idempotency key; reconcile an uncertain outcome rather than retrying.', z.object({ ...account, url: z.url().max(2048), idempotencyKey, expectedRevision: z.string().regex(/^[a-f0-9]{64}$/), expectedContextFingerprint: z.string().regex(/^[a-f0-9]{64}$/), expectedSessionGeneration: z.number().int().nonnegative(), addressRef: z.string().regex(/^[a-f0-9]{64}$/), expectedFingerprint: z.string().regex(/^[a-f0-9]{64}$/) }).strict(), 'checkout:prepare', false, async (input, owner) => {
+      const { accountRef, idempotencyKey: key, ...args } = input;
+      await store.getAccount(owner.id, String(accountRef));
+      if (!options.liveEnabled) return { status: 'requires_user_action', error: { code: 'LIVE_ACCESS_DISABLED', retryable: false } };
+      const op = await store.start(owner.id, String(accountRef), 'checkout_address_select', 'write', args, String(key));
+      return { status: 'pending', operationId: op.id };
+    });
     add("buying_options_get", "Read exact product identity, seller, condition and observed purchase modes/frequency values. This does not buy or subscribe. Poll operations_get.", z.object({ ...account, asin }).strict(), "account:read", true, async (input, owner) => {
       await store.getAccount(owner.id, String(input.accountRef));
       if (!options.liveEnabled) return { status: "requires_user_action", error: { code: "LIVE_ACCESS_DISABLED", retryable: false } };
@@ -331,7 +344,7 @@ export function createRegistry(
     }
     for (let index = 0; index < tools.length; index++) {
       const tool = tools[index]!;
-      if ([...Object.keys(purchasePreparationSchemas), ...purchaseCommitKinds, "purchase_intent_get"].includes(tool.name))
+      if ([...Object.keys(purchasePreparationSchemas), ...purchaseCommitKinds, "purchase_intent_get", "checkout_address_select"].includes(tool.name))
         tools[index] = { ...tool, annotations: { ...tool.annotations, idempotentHint: true, ...(tool.name === "purchase_intent_get" ? { openWorldHint: false } : {}) } };
     }
   }

@@ -29,9 +29,10 @@ Your account session stays in a dedicated local browser.
 | Recover a request | Find a durable operation handle after a client disconnect and retrieve its result. |
 
 The default read-only mode exposes **38 tools**. Explicitly enabling the existing
-cart adapters exposes 42; enabling purchasing exposes 48. Local price alerts work
+cart adapters exposes 42; enabling purchasing exposes 50. Local price alerts work
 in read-only mode. [Purchase workflows](docs/PURCHASING.md) cover Buy It Now, cart
-checkout and Subscribe & Save enrollment with exact-term owner approval.
+checkout, existing saved-address selection, and Subscribe & Save enrollment with
+exact-term owner approval for purchases and subscriptions.
 
 Live reads have been observed for the cart, paginated order history, order details,
 split-shipment tracking, and subscriptions. Other page paths and all cart writes

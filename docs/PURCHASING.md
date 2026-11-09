@@ -12,7 +12,7 @@ AMAZON_PURCHASING_ENABLED=true
 ```
 
 The default profile has 38 tools; enabling cart writes exposes 42, and enabling
-purchasing exposes 48. `amazon_capabilities` reports the active profile.
+purchasing exposes 50. `amazon_capabilities` reports the active profile.
 Purchase adapters are implemented and verified with synthetic browser pages,
 real isolated Postgres databases, the official MCP client, and compiled Chromium.
 No real purchase or enrollment has been used as a test. Amazon layouts that do
@@ -45,9 +45,11 @@ not expose complete evidence stop with `unsupported` or a human handoff.
 
    If Amazon opens its address-selection step instead of review, preparation
    returns `requires_user_action` with `checkout_address_selection_required` and
-   the observed Amazon handoff URL. It does not select or edit an address, create
-   an approval intent, or submit an order. The owner must complete that step
-   before a supported review can be prepared.
+   the observed Amazon handoff URL. Preserve the complete validated URL,
+   including its routing parameters. Read and select an existing saved address
+   through the separate checkout-address workflow below before preparing fresh
+   purchase terms. Preparation itself does not select an address or place an
+   order.
 3. Poll the same operation. Its completed result contains `intentId`, exact
    terms, expiry, and the private owner `reviewUrl`.
 4. The owner opens that link, signs in with the separate local owner token, and
@@ -60,6 +62,65 @@ Preparation is never a purchase authorization. The approval expires after five
 minutes and is invalidated by a worker/browser lifecycle change. A changed price,
 address, payment method, delivery promise, quantity, seller, or purchase mode
 requires new preparation and approval.
+
+## Existing saved checkout addresses
+
+`checkout_addresses_get` reads saved choices from the exact observed checkout
+address URL. Its result is private to the authenticated owner and includes
+rendered address summaries, opaque address references and fingerprints, selected
+state, session and checkout context, and a revision. Match the intended existing
+destination explicitly; an address being first or marked as default is not enough
+to choose it. Missing or ambiguous evidence stops selection.
+
+Modern checkout can omit Amazon's ordinary account greeting. The address reader
+can verify the signed-in account on a fixed account page during the same
+serialized operation, then return to the complete checkout URL and require the
+recognized saved-address controls without sign-in or payment challenges. This
+proof is not cached and does not weaken authentication for other pages.
+
+`checkout_address_select` is a separate journaled write with a stable idempotency
+key. It requires a fresh matching address snapshot and selects only the requested
+existing entry for that checkout. It does not create or edit addresses, change the
+account default, approve a purchase, or place an order. Selection must be verified
+against the resulting checkout destination; a checked radio alone is insufficient.
+Changed context or address evidence stops the action before an effect. An
+uncertain effect is nonretryable and uses the normal write quarantine.
+
+Pass the fields from that exact snapshot, rather than reconstructing identity
+from the displayed address text:
+
+```json
+{
+  "accountRef": "ACCOUNT_UUID",
+  "url": "COMPLETE_OBSERVED_CHECKOUT_ADDRESS_URL",
+  "idempotencyKey": "one-existing-address-selection",
+  "expectedRevision": "SNAPSHOT_REVISION",
+  "expectedContextFingerprint": "SNAPSHOT_CONTEXT_FINGERPRINT",
+  "expectedSessionGeneration": 1,
+  "addressRef": "OBSERVED_ADDRESS_REF",
+  "expectedFingerprint": "OBSERVED_ADDRESS_FINGERPRINT"
+}
+```
+
+Refresh the snapshot after a worker/browser restart. Selection currently requires
+a complete explicitly rendered US destination, including recipient, street and
+unit, city, region, ZIP and country. The result distinguishes verification of the
+physical destination alone from verification that also observes the saved-address
+ID. Physical equality does not independently prove retained phone details.
+
+Use `checkout_addresses_get` with `inspectCurrent: true` for diagnostic-only
+inspection without navigation. This returns stage and control metadata without
+address summaries, references, purchase terms, or intents. Diagnostic query
+output contains names only. The full validated checkout URL remains necessary
+for navigation and snapshot identity; dropping `pipelineType` or `isBuyNow` can
+change the checkout flow.
+
+The mutually exclusive `reconcileCurrent: true` mode reads the applied destination
+on the current same-checkout address, payment or review stage with fresh account
+authentication. It never repeats an address selection or clears quarantine.
+
+After address selection, prepare and approve fresh complete purchase terms.
+Shipping eligibility, tax, delivery and total may change with the destination.
 
 ## Cart checkout
 

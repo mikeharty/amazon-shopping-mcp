@@ -94,11 +94,32 @@ describe.skipIf(!connection)("Real MCP, owner approval, Postgres journal and fix
   }
   it("discovers the new tools while the read-only profile retains its original surface", async () => {
     const tools = (await client.listTools()).tools;
-    for (const name of ["buy_now_prepare", "checkout_prepare", "checkout_submit", "subscriptions_prepare", "subscriptions_submit", "buying_options_get", "purchase_intent_get"]) expect(tools.some((tool) => tool.name === name)).toBe(true);
+    for (const name of ["buy_now_prepare", "checkout_prepare", "checkout_submit", "subscriptions_prepare", "subscriptions_submit", "buying_options_get", "purchase_intent_get", "checkout_addresses_get", "checkout_address_select"]) expect(tools.some((tool) => tool.name === name)).toBe(true);
     expect(tools.find((tool) => tool.name === "checkout_submit")?.annotations).toMatchObject({ readOnlyHint: false, idempotentHint: true });
     const readonly = createRegistry(store, { liveEnabled: true, retainObservations: false, origin });
     expect(readonly.tools.some((tool) => tool.name === "checkout_submit")).toBe(false);
     expect(readonly.tools).toHaveLength(38);
+  });
+  it('journals selection idempotently, gates disabled workers, and quarantines uncertain address effects without creating intents', async () => {
+    const account = await store.account(owner);
+    const args = { accountRef: account.id, url: 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address', idempotencyKey: 'address-write-idempotency', expectedRevision: 'a'.repeat(64), expectedContextFingerprint: 'b'.repeat(64), expectedSessionGeneration: 1, addressRef: 'c'.repeat(64), expectedFingerprint: 'd'.repeat(64) };
+    const pending = await call('checkout_address_select', args);
+    expect(pending.status).toBe('pending');
+    expect(await call('checkout_address_select', args)).toMatchObject({ operationId: pending.operationId });
+    expect((await call('checkout_address_select', { ...args, expectedFingerprint: 'e'.repeat(64) })).status).toBe('conflict');
+    let effects = 0;
+    const noEffectProvider = { read: async (): Promise<Result> => ({ status: 'unsupported' }), mutate: async (): Promise<Result> => { effects++; return { status: 'outcome_unknown', error: { code: 'fixture_uncertain', retryable: false } }; }, close: async () => {} };
+    await new Executor(store, noEffectProvider, 'disabled-address-worker', false, false, false, false).run(pending.operationId!);
+    expect((await store.getOperation(owner, pending.operationId!)).result).toMatchObject({ status: 'failed', error: { code: 'ADDRESS_SELECTION_DISABLED' } });
+    expect(effects).toBe(0);
+    const isolatedOwner = 'isolated-address-uncertainty'; const isolatedAccount = await store.account(isolatedOwner);
+    const operation = await store.start(isolatedOwner, isolatedAccount.id, 'checkout_address_select', 'write', { url: args.url }, 'one-uncertain-address-write');
+    await new Executor(store, noEffectProvider, 'address-fixture-worker', false, false, false, true).run(operation.id);
+    expect(effects).toBe(1);
+    expect((await store.getOperation(isolatedOwner, operation.id)).result).toMatchObject({ status: 'outcome_unknown' });
+    expect((await store.getAccount(isolatedOwner, isolatedAccount.id)).quarantined).toBe(true);
+    const intentCount = await store.pool.query('SELECT count(*)::int AS count FROM intents WHERE account_id=$1', [isolatedAccount.id]);
+    expect(intentCount.rows[0].count).toBe(0);
   });
   it("prepares via MCP, approves through the actual owner page and executes one purchase across concurrent retries", async () => {
     const { account, intent } = await prepare("integration-preparation");

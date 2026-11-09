@@ -26,6 +26,10 @@ export class Executor {
       await this.store.finish(op, this.workerId, { status: "failed", error: { code: "AMAZON_READ_ONLY", retryable: false } });
       return;
     }
+    if (op.kind === 'checkout_address_select' && (!this.purchasingEnabled || this.amazonReadOnly || op.mode !== 'write')) {
+      await this.store.finish(op, this.workerId, { status: 'failed', error: { code: 'ADDRESS_SELECTION_DISABLED', retryable: false } });
+      return;
+    }
     if ((purchaseCommitKinds as readonly string[]).includes(op.kind) && (!this.purchasingEnabled || this.amazonReadOnly)) {
       await this.store.finish(op, this.workerId, { status: "failed", error: { code: "PURCHASING_DISABLED", retryable: false } });
       return;

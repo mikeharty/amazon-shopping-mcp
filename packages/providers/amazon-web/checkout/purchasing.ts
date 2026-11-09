@@ -8,6 +8,7 @@ import { extractOrder, extractOrders } from "../orders/index.js";
 import { extractSubscriptions } from "../subscriptions/index.js";
 import { money } from "../types.js";
 import { extractCheckout } from "./index.js";
+import { shippingIdentity } from "./address-identity.js";
 
 const unsupported = (code: string, missing?: string[]): Result => ({ status: "unsupported", error: { code, retryable: false }, ...(missing ? { coverage: { complete: false, missing } } : {}) });
 const conflict = (code: string): Result => ({ status: "conflict", error: { code, retryable: false } });
@@ -33,13 +34,28 @@ async function navigate(page: Page, url: string) {
   await checkPage(page);
 }
 
-function isAddressStepUrl(value: string): boolean {
+export async function hasVisibleAddressAuthForm(page: Page): Promise<boolean> {
+  return page.evaluate(() => Array.from(document.querySelectorAll('form[name="signIn"], form#ap_signin_form, input[name="email"], input[type="password"], input[name="otpCode"], input[name="code"], input[name="verificationCode"], input[autocomplete="cc-csc"], input[name="cvv"]')).some((el) => (el as HTMLElement).getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden'));
+}
+
+export function isAddressStepUrl(value: string): boolean {
   try {
     const url = new URL(value);
     return url.origin === "https://www.amazon.com" && !url.username && !url.password && !url.hash &&
       /^\/checkout\/p\/p-\d{3}-\d{7}-\d{7}\/address$/.test(url.pathname) &&
-      [...url.searchParams.keys()].every((key) => ["ref", "ref_", "pipelineType", "hasWorkingJavascript", "purchaseId", "checkoutSessionId"].includes(key));
+      [...url.searchParams.keys()].every((key) => ["ref", "ref_", "referrer", "pipelineType", "isBuyNow", "hasWorkingJavascript", "purchaseId", "checkoutSessionId"].includes(key) && url.searchParams.getAll(key).length === 1);
   } catch { return false; }
+}
+
+export function canonicalAddressUrl(value: string): string {
+  const url = new URL(value);
+  url.searchParams.sort();
+  return url.toString();
+}
+
+export function addressRoutingIdentity(value: string): string {
+  const url = new URL(value);
+  return JSON.stringify({ origin: url.origin, path: url.pathname, pipelineType: url.searchParams.getAll('pipelineType'), isBuyNow: url.searchParams.getAll('isBuyNow'), purchaseId: url.searchParams.getAll('purchaseId'), checkoutSessionId: url.searchParams.getAll('checkoutSessionId') });
 }
 
 async function awaitReviewEntry(page: Page): Promise<Result | undefined> {
@@ -50,12 +66,200 @@ async function awaitReviewEntry(page: Page): Promise<Result | undefined> {
     throw error;
   }
   if (!isReviewUrl(page.url()) && !isAddressStepUrl(page.url())) return unsupported("review_page_unavailable");
-  await checkPage(page);
   if (isAddressStepUrl(page.url())) {
-    const url = new URL(page.url());
-    return { status: "requires_user_action", error: { code: "checkout_address_selection_required", retryable: false }, action: { kind: "checkout_address_selection", url: `${url.origin}${url.pathname}` } };
+    const state = await classifyPage(page);
+    if (state.kind === 'challenge') throw new BrowserRuntimeError(`challenge_${state.challenge}`, state.message);
+    if (await hasVisibleAddressAuthForm(page)) throw new BrowserRuntimeError('challenge_signin', 'Complete Amazon authentication');
+    return { status: "requires_user_action", error: { code: "checkout_address_selection_required", retryable: false }, action: { kind: "checkout_address_selection", url: canonicalAddressUrl(page.url()) } };
   }
+  await checkPage(page);
   return undefined;
+}
+
+async function readAddressLayoutDiagnostics(page: Page) {
+  return page.evaluate(() => {
+      const visible = (el: Element) => (el as HTMLElement).getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+      const anyVisible = (selector: string) => Array.from(document.querySelectorAll(selector)).some(visible);
+      const identifier = (value: string | null | undefined) => value && /^[A-Za-z][A-Za-z0-9_.:\[\]-]{0,119}$/.test(value) ? value : undefined;
+      const safePath = (value: string | null | undefined) => {
+        try { if (value) { const url = new URL(value, location.href); if (url.origin === 'https://www.amazon.com' && !url.username && !url.password) return url.pathname; } } catch { /* Omit unsafe paths. */ }
+        return undefined;
+      };
+      const structure: { depth: number; tag: string; id?: string; classNames: string[]; role?: string; ariaChecked?: boolean; ariaSelected?: boolean; attributeNames: string[]; fieldType?: string; fieldName?: string; path?: string }[] = [];
+      const booleanAttribute = (el: Element, name: string) => el.getAttribute(name) === 'true' ? true : el.getAttribute(name) === 'false' ? false : undefined;
+      let maxDepth = 6;
+      let nodeLimit = 120;
+      const visit = (el: Element, depth: number) => {
+        if (depth > maxDepth || structure.length >= nodeLimit || !visible(el)) return;
+        const input = el instanceof HTMLInputElement ? el : undefined;
+        const form = input?.form ?? el.closest('form');
+        structure.push({ depth, tag: el.tagName.toLowerCase(), id: identifier(el.id), classNames: Array.from(el.classList).filter((name) => /^[A-Za-z0-9_-]{1,100}$/.test(name)).slice(0, 12), role: identifier(el.getAttribute('role')), ariaChecked: booleanAttribute(el, 'aria-checked'), ariaSelected: booleanAttribute(el, 'aria-selected'), attributeNames: el.getAttributeNames().filter((name) => /^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/.test(name)).slice(0, 40), fieldType: input ? identifier(input.type) : undefined, fieldName: identifier(el.getAttribute('name')), path: safePath(el.getAttribute('formaction') ?? (el.matches('button, input[type="submit"]') ? form?.getAttribute('action') : undefined) ?? el.getAttribute('href')) });
+        for (const child of el.children) visit(child, depth + 1);
+      };
+      // Reserve the first observation for Continue even when many cards fill the cap.
+      const firstModernRow = document.querySelector('#shipping-address-selection-panel span[id^="select-destination-on-sasp-desktop-panel-id-"][data-select-destination-on-sasp-desktop-panel]');
+      const primary = document.querySelector('#checkout-primary-continue-button-id');
+      if (primary) visit(primary, 0);
+      if (firstModernRow) { maxDepth = 12; nodeLimit = Math.min(120, structure.length + 80); visit(firstModernRow, 0); maxDepth = 6; nodeLimit = 120; }
+      for (const selector of ['#shipping-address-selection-panel']) {
+        const root = document.querySelector(selector); if (root) visit(root, 0);
+      }
+      const modernAddressControls = Array.from(document.querySelectorAll<HTMLElement>('#shipping-address-selection-panel span[id^="select-destination-on-sasp-desktop-panel-id-"][data-select-destination-on-sasp-desktop-panel]')).filter(visible).slice(0, 20).map((row) => {
+        const radios = row.querySelectorAll<HTMLInputElement>('input[type="radio"][name="destinationSubmissionUrl"]');
+        let destination: { path: string; queryKeys: string[]; selectionAction?: string } | undefined;
+        if (radios.length === 1 && /^(?:\/(?!\/)|https:\/\/)/.test(radios[0]!.value) && visible(row)) {
+          try {
+            const url = new URL(radios[0]!.value, location.href);
+            if (url.origin === 'https://www.amazon.com' && !url.username && !url.password && !url.hash && /^\/checkout\/p\/p-\d{3}-\d{7}-\d{7}\/address(?:\/[A-Za-z0-9_-]+)*$/.test(url.pathname)) destination = { path: url.pathname, queryKeys: [...new Set(url.searchParams.keys())].filter((key) => identifier(key) !== undefined).slice(0, 40), selectionAction: url.searchParams.get('action') === 'select' ? 'select' : undefined };
+          } catch { /* Invalid or non-URL radio payloads remain unobserved. */ }
+        }
+        return { id: identifier(row.id), dataAction: row.getAttribute('data-action') === 'select-destination-on-sasp-desktop-panel' ? 'select-destination-on-sasp-desktop-panel' : undefined, radioName: radios.length === 1 ? 'destinationSubmissionUrl' : undefined, destination };
+      });
+      const primaryInput = primary?.querySelector<HTMLInputElement>('input[type="submit"]');
+      return {
+        modernAddressControls,
+        primaryContinueControl: primaryInput ? { name: identifier(primaryInput.name), dataTestId: identifier(primaryInput.getAttribute('data-testid')), type: 'submit' } : undefined,
+        asin: /^[A-Z0-9]{10}$/.test(document.querySelector<HTMLInputElement>('#ASIN')?.value ?? '') ? document.querySelector<HTMLInputElement>('#ASIN')!.value : undefined,
+        primaryContinueLabel: (() => {
+          if (!primary || !visible(primary)) return undefined;
+          const label = (primary.querySelector('[id$="-announce"]')?.textContent ?? primary.textContent ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+          return ['continue', 'use this address', 'deliver to this address', 'use this payment method', 'continue to payment', 'place your order'].find((known) => known === label);
+        })(),
+        structure,
+        greetingPresent: anyVisible('#nav-link-accountList-nav-line-1, #nav-link-accountList .nav-line-1'),
+        signinFormPresent: anyVisible('form[name="signIn"], form#ap_signin_form, #ap_email, input[name="email"]'),
+        passwordFormPresent: anyVisible('input[type="password"], #ap_password'),
+        mfaFormPresent: anyVisible('input[name="otpCode"], input[name="code"], input[name="verificationCode"]'),
+        paymentAuthFormPresent: anyVisible('input[autocomplete="cc-csc"], input[name="cvv"]'),
+        addressElementCount: Array.from(document.querySelectorAll('.displayAddressDiv, .displayAddressUL, [id^="address-book-entry-"]')).filter(visible).length,
+        elementIds: Array.from(document.querySelectorAll<HTMLElement>('[id]')).filter(visible).map((el) => el.id).filter((id) => /address|shipping|ship-to|checkout/i.test(id) && identifier(id)).slice(0, 80),
+        fields: Array.from(document.querySelectorAll<HTMLInputElement>('input[name]')).filter((el) => /address|shipping|shipTo/i.test(el.name)).slice(0, 80).map((el) => ({ name: identifier(el.name), type: identifier(el.type), id: identifier(el.id), visible: visible(el) })),
+        controls: Array.from(document.querySelectorAll<HTMLElement>('button, input[type="submit"], a[href]')).filter(visible).filter((el) => /address|deliver|ship to|continue|use this/i.test(el.getAttribute('aria-label') || (el instanceof HTMLInputElement ? el.value : el.textContent) || '')).slice(0, 40).map((el) => {
+          const input = el as HTMLInputElement;
+          const form = input.form ?? el.closest('form');
+          return { id: identifier(el.id), name: identifier(input.name), path: safePath(el.getAttribute('formaction') ?? form?.getAttribute('action') ?? el.getAttribute('href')) };
+        }),
+      };
+    });
+}
+
+export async function readCheckoutAddresses(page: Page, input: Record<string, unknown>, context: ProviderContext): Promise<Result> {
+  if (typeof input.url !== "string" || !isAddressStepUrl(input.url)) return unsupported("invalid_address_step_url");
+  if (input.inspectCurrent === true) {
+    const current = new URL(page.url());
+    if (page.url() === 'about:blank') return { status: 'partial', data: { diagnosticOnly: true, authenticationVerified: false, requestedContextMatches: false, diagnostics: { stage: 'blank', page: { origin: 'about:', path: 'blank' } } }, coverage: { complete: false, missing: ['requested_address_context'] } };
+    if (current.origin !== 'https://www.amazon.com' || current.username || current.password) return { status: 'partial', data: { diagnosticOnly: true, authenticationVerified: false, requestedContextMatches: false, diagnostics: { stage: 'untrusted', page: { origin: 'untrusted' } } }, coverage: { complete: false, missing: ['requested_address_context'] } };
+    const state = await classifyPage(page);
+    const diagnostics = await readAddressLayoutDiagnostics(page);
+    const path = /^\/[\x21-\x7e]{0,511}$/.test(current.pathname) ? current.pathname : undefined;
+    const queryKeys = [...new Set(current.searchParams.keys())].filter((key) => /^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/.test(key)).slice(0, 40);
+    const challenge = state.kind === 'challenge' || diagnostics.signinFormPresent || diagnostics.passwordFormPresent || diagnostics.mfaFormPresent || diagnostics.paymentAuthFormPresent;
+    const stage = challenge ? 'authentication' : /\/address(?:\/|$)/.test(current.pathname) ? 'address' : /\/payment(?:\/|$)/.test(current.pathname) ? 'payment' : isReviewUrl(page.url()) ? 'review' : diagnostics.asin ? 'product' : current.pathname.startsWith('/checkout/') ? 'checkout_unknown' : 'amazon_other';
+    const requestedContextMatches = isAddressStepUrl(page.url()) && addressRoutingIdentity(page.url()) === addressRoutingIdentity(input.url);
+    return { status: challenge ? 'requires_user_action' : 'partial', data: { diagnosticOnly: true, authenticationVerified: false, requestedContextMatches, diagnostics: { stage, page: { origin: current.origin, path, queryKeys, kind: state.kind, ...(state.kind === 'challenge' ? { challenge: state.challenge } : {}) }, ...diagnostics } }, coverage: { complete: false, missing: ['diagnostic_only'] }, ...(challenge ? { error: { code: state.kind === 'challenge' ? `challenge_${state.challenge}` : 'challenge_signin', retryable: false } } : {}) };
+  }
+  await page.goto(input.url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+  let authenticationEvidence = 'checkout_greeting';
+  let authenticationLayoutDiagnostics: Record<string, unknown> | undefined;
+  try {
+    await checkPage(page);
+    if (await hasVisibleAddressAuthForm(page)) throw new BrowserRuntimeError('challenge_signin', 'Complete Amazon authentication');
+  } catch (error) {
+    if (!(error instanceof BrowserRuntimeError) || !error.code.startsWith('challenge_')) throw error;
+    const current = new URL(page.url());
+    if (current.origin !== 'https://www.amazon.com' || current.username || current.password) return unsupported('address_step_unavailable');
+    const state = await classifyPage(page);
+    const diagnostics = await readAddressLayoutDiagnostics(page);
+    const safeCurrentPath = /^\/[\x21-\x7e]{0,511}$/.test(current.pathname) ? current.pathname : undefined;
+    const queryKeys = [...new Set(current.searchParams.keys())].filter((key) => /^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/.test(key)).slice(0, 40);
+    let bridged = false;
+    if (error.code === 'challenge_signin' && state.kind === 'ready' && isAddressStepUrl(page.url()) && !diagnostics.signinFormPresent && !diagnostics.passwordFormPresent && !diagnostics.mfaFormPresent) {
+      const bridgeLayout = async () => page.evaluate(() => {
+        const visible = (el: Element) => (el as HTMLElement).getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+        const authForm = Array.from(document.querySelectorAll('form[name="signIn"], form#ap_signin_form, input[name="email"], input[type="password"], input[name="otpCode"], input[name="code"], input[name="verificationCode"], input[autocomplete="cc-csc"], input[name="cvv"]')).some(visible);
+        const rows = Array.from(document.querySelectorAll('#shipping-address-selection-panel span[id^="select-destination-on-sasp-desktop-panel-id-"][data-select-destination-on-sasp-desktop-panel]')).filter(visible);
+        return !authForm && rows.some((row) => Array.from(row.querySelectorAll('.a-radio[data-a-input-name] label')).some((label) => visible(label) && Boolean(label.querySelector('input[type="radio"], [role="radio"]'))));
+      });
+      if (await bridgeLayout()) {
+        try {
+          const returnUrl = canonicalAddressUrl(page.url());
+          // This proof is local to this serialized operation and never cached.
+          await navigate(page, 'https://www.amazon.com/gp/your-account/order-history');
+          if (await hasVisibleAddressAuthForm(page)) throw new BrowserRuntimeError('challenge_signin', 'Complete Amazon authentication');
+          await page.goto(returnUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+          const checkoutState = await classifyPage(page);
+          bridged = isAddressStepUrl(page.url()) && addressRoutingIdentity(page.url()) === addressRoutingIdentity(returnUrl) && new URL(page.url()).pathname === new URL(input.url).pathname && checkoutState.kind === 'ready' && await bridgeLayout();
+        } catch (bridgeError) {
+          if (!(bridgeError instanceof BrowserRuntimeError)) throw bridgeError;
+        }
+      }
+    }
+    if (!bridged) return { status: 'requires_user_action', error: { code: error.code, retryable: false }, data: { authenticationVerified: false, diagnostics: { page: { origin: current.origin, path: safeCurrentPath, queryKeys, kind: state.kind, ...(state.kind === 'challenge' ? { challenge: state.challenge } : {}) }, ...diagnostics } } };
+    authenticationEvidence = 'same_run_account_page_and_saved_checkout';
+    authenticationLayoutDiagnostics = diagnostics;
+  }
+  if (!isAddressStepUrl(page.url())) return unsupported("address_step_unavailable");
+  const raw = await page.evaluate(() => {
+    const visible = (el: Element) => (el as HTMLElement).getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
+    const clean = (value: string | null | undefined) => value?.replace(/\s+/g, " ").trim().slice(0, 1000);
+    const identifier = (value: string | null | undefined) => value && /^[A-Za-z][A-Za-z0-9_.:\[\]-]{0,119}$/.test(value) ? value : undefined;
+    const path = (value: string | null | undefined) => {
+      try { if (value) { const url = new URL(value, location.href); if (url.origin === 'https://www.amazon.com' && !url.username && !url.password) return url.pathname; } } catch { /* Omit invalid destinations. */ }
+      return undefined;
+    };
+    const ancestorIds = (el: Element) => {
+      const ids: string[] = [];
+      let node: Element | null = el;
+      for (let i = 0; node && i < 5; i++, node = node.parentElement) {
+        const id = identifier(node.id); if (id) ids.push(id);
+      }
+      return ids;
+    };
+    const modernRows = Array.from(document.querySelectorAll<HTMLElement>('#shipping-address-selection-panel span[id^="select-destination-on-sasp-desktop-panel-id-"][data-select-destination-on-sasp-desktop-panel]')).filter(visible);
+    const addressNodes = Array.from(document.querySelectorAll<HTMLElement>('.displayAddressDiv, .displayAddressUL')).filter(visible).filter((el) => !el.parentElement?.closest('.displayAddressDiv, .displayAddressUL') && !modernRows.some((row) => row.contains(el)));
+    const addresses = addressNodes.map((el) => {
+      const row = el.closest('[data-address-id], [id^="address-book-entry-"], .address-book-entry, .address-row') ?? el.parentElement;
+      const inputs = row ? Array.from(row.querySelectorAll<HTMLInputElement>('input[type="radio"]')).filter(visible) : [];
+      return { summary: clean(el.innerText), ancestorIds: ancestorIds(el), selected: inputs.length === 1 ? inputs[0]!.checked : undefined, addressLines: el.innerText.split(/\n+/), destinationIdentity: undefined as string | undefined, savedAddressId: undefined as string | undefined };
+    }).concat(modernRows.flatMap((row) => {
+      const labels = Array.from(row.querySelectorAll<HTMLElement>('.a-radio[data-a-input-name] label')).filter(visible);
+      if (labels.length !== 1) return [];
+      const radios = labels[0]!.querySelectorAll<HTMLInputElement>('input[type="radio"]');
+      if (radios.length !== 1) return [];
+      const region = labels[0]!.querySelector<HTMLElement>('.destination-data-alignment');
+      const spans = region ? Array.from(region.children).filter((el) => el.tagName === 'SPAN' && visible(el)).map((el) => (el as HTMLElement).innerText.trim()).filter(Boolean) : [];
+      const addressLines = spans.length ? spans : (region ?? labels[0]!).innerText.split(/\n+/);
+      let destinationIdentity: string | undefined; let savedAddressId: string | undefined;
+      try {
+        if (/^(?:\/(?!\/)|https:\/\/)/.test(radios[0]!.value)) {
+          const destination = new URL(radios[0]!.value, location.href);
+          if (destination.origin === 'https://www.amazon.com' && !destination.username && !destination.password && !destination.hash && destination.pathname === `${location.pathname}/shiptodestination`) {
+            savedAddressId = destination.searchParams.get('addressID') ?? undefined;
+            destinationIdentity = JSON.stringify({ path: destination.pathname, addressID: savedAddressId, action: destination.searchParams.getAll('action'), pipelineType: destination.searchParams.getAll('pipelineType'), isBuyNow: destination.searchParams.getAll('isBuyNow') });
+          }
+        }
+      } catch { /* No inferred selection identity. */ }
+      return [{ summary: clean(labels[0]!.innerText), ancestorIds: ancestorIds(row), selected: radios[0]!.checked, addressLines, destinationIdentity, savedAddressId }];
+    })).filter((address) => address.summary);
+    const relevant = Array.from(document.querySelectorAll<HTMLElement>('[id]')).filter(visible).filter((el) => /address|shipping|ship-to|checkout/i.test(el.id)).slice(0, 80).map((el) => ({ id: identifier(el.id), ancestorIds: ancestorIds(el) }));
+    const fields = Array.from(document.querySelectorAll<HTMLInputElement>('input[name]')).filter((el) => /address|shipping|shipTo/i.test(el.name)).slice(0, 80).map((el) => ({ name: identifier(el.name), type: identifier(el.type), id: identifier(el.id), visible: visible(el), ancestorIds: ancestorIds(el) }));
+    const controls = Array.from(document.querySelectorAll<HTMLElement>('button, input[type="submit"], a[href]')).filter(visible).filter((el) => {
+      const label = el.getAttribute('aria-label') || (el instanceof HTMLInputElement ? el.value : el.textContent) || '';
+      return /address|deliver|ship to|continue|use this/i.test(label);
+    }).slice(0, 40).map((el) => {
+      const input = el as HTMLInputElement;
+      const form = input.form ?? el.closest('form');
+      return { id: identifier(el.id), name: identifier(input.name), label: clean(el.getAttribute('aria-label') || (el instanceof HTMLInputElement ? el.value : el.textContent)), path: path(el.getAttribute('formaction') ?? form?.getAttribute('action') ?? el.getAttribute('href')), ancestorIds: ancestorIds(el) };
+    });
+    return { addresses, diagnostics: { relevant, fields, controls } };
+  });
+  const checkoutUrl = canonicalAddressUrl(page.url());
+  const contextFingerprint = digest({ checkoutUrl, accountRef: context.accountRef, sessionGeneration: context.sessionGeneration });
+  const addresses = raw.addresses.map(({ destinationIdentity, savedAddressId, ...address }) => ({ ...address, physicalIdentity: shippingIdentity(address.addressLines), selectionIdentity: destinationIdentity ? digest(destinationIdentity) : undefined, savedAddressIdFingerprint: savedAddressId ? digest(savedAddressId) : undefined, fingerprint: digest({ summary: address.summary, destinationIdentity }), addressRef: digest({ contextFingerprint, summary: address.summary, ancestorIds: address.ancestorIds }) }));
+  const recognized = addresses.length > 0;
+  const unique = new Set(addresses.map((address) => address.fingerprint)).size === addresses.length;
+  const data = { recognized, checkoutUrl, contextFingerprint, sessionGeneration: context.sessionGeneration, authenticationEvidence, addresses, diagnostics: { ...raw.diagnostics, ...(authenticationLayoutDiagnostics ? { authenticationLayout: authenticationLayoutDiagnostics } : {}) }, revision: digest({ contextFingerprint, addresses }) };
+  return { status: recognized && unique ? "ok" : "partial", data, coverage: { complete: recognized && unique, missing: !recognized ? ["saved_address_layout"] : !unique ? ["unique_address_identity"] : [] }, observation: { source: "amazon-web", observedAt: new Date().toISOString(), contextRef: context.accountRef, authentication: "verified" } };
 }
 
 export async function buyingOptions(page: Page, asin: unknown): Promise<Result> {

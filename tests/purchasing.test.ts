@@ -64,16 +64,152 @@ describe("Purchasing through offline Amazon browser fixtures", () => {
   function omitProductEvidence() {
     product = product.replace('<span id="condition">New</span>', '').replace(/<label data-purchase-mode="[\s\S]*?<\/label>/g, '');
   }
-  it("hands off a verified Amazon address step without producing terms or submitting", async () => {
+  it('identifies a blank current tab without navigating or evaluating private content', async () => {
+    const result = await provider.read('checkout_addresses_get', { url: 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address', inspectCurrent: true }, ctx);
+    expect(result).toMatchObject({ status: 'partial', data: { diagnosticOnly: true, authenticationVerified: false, requestedContextMatches: false, diagnostics: { stage: 'blank', page: { origin: 'about:', path: 'blank' } } } });
+    expect(page.url()).toBe('about:blank'); expect(clicks).toBe(0);
+  });
+  it.each([
+    ['https://www.amazon.com/dp/B0FIXTURE1', 'product', false],
+    ['https://www.amazon.com/checkout/p/p-999-1111111-2222222/address', 'address', false],
+    ['https://www.amazon.com/checkout/p/p-106-9344849-4773810/address', 'address', true],
+    ['https://www.amazon.com/checkout/p/p-106-9344849-4773810/payment', 'payment', false],
+  ])('inspects the current %s stage without navigation or address snapshots', async (currentUrl, stage, matches) => {
+    const requested = 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address';
+    await page.goto(String(currentUrl));
+    let requests = 0; page.on('request', () => requests++);
+    const result = await provider.read('checkout_addresses_get', { url: requested, inspectCurrent: true }, ctx);
+    expect(result).toMatchObject({ status: 'partial', data: { diagnosticOnly: true, authenticationVerified: false, requestedContextMatches: matches, diagnostics: { stage } } });
+    expect(page.url()).toBe(currentUrl); expect(requests).toBe(0);
+    expect(JSON.stringify(result)).not.toMatch(/"(?:summary|fingerprint|addressRef|intentId)"\s*:|123 Example St|Visa ending in 4242/);
+    if (stage === 'product') expect(result).toMatchObject({ data: { diagnostics: { asin: 'B0FIXTURE1' } } });
+    expect(clicks).toBe(0);
+  });
+  it('withholds text and values while inspecting an authentication challenge and canonical Continue label', async () => {
+    const requested = 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address';
+    await page.route('**/ap/signin?*', (route) => route.fulfill({ contentType: 'text/html', body: '<input type="password" value="SECRET_PASSWORD"><div class="displayAddressDiv">PRIVATE_ADDRESS</div><span id="checkout-primary-continue-button-id"><span id="primary-announce">Continue</span></span>' }));
+    await page.goto('https://www.amazon.com/ap/signin?token=SECRET_QUERY');
+    const result = await provider.read('checkout_addresses_get', { url: requested, inspectCurrent: true }, ctx);
+    expect(result).toMatchObject({ status: 'requires_user_action', data: { diagnostics: { stage: 'authentication', primaryContinueLabel: 'continue', page: { path: '/ap/signin', queryKeys: ['token'] } } } });
+    expect(JSON.stringify(result)).not.toMatch(/PRIVATE_ADDRESS|SECRET_|summary|fingerprint|addressRef/);
+  });
+  it("reads private saved address identities and safe layout evidence without selecting", async () => {
+    const addressUrl = 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address';
+    await page.route('**/checkout/p/*/address', (route) => route.fulfill({ contentType: 'text/html', body: `${greeting}<main id="checkout-addresses"><form action="/checkout/p/p-106-9344849-4773810/address?token=SECRET_TOKEN"><div id="address-book-entry-0"><div class="displayAddressDiv">Fixture Home, 123 Example St, Seattle WA 98101</div><input id="address-radio-0" name="addressId" type="radio" checked value="SECRET_ADDRESS_ID"><input name="addressToken" type="hidden" value="SECRET_HIDDEN"><button name="useAddress">Use this address</button></div><div id="address-book-entry-1" style="display:none"><div class="displayAddressDiv">Hidden address</div></div></form></main>` }));
+    const result = await provider.read('checkout_addresses_get', { url: addressUrl }, ctx);
+    expect(result).toMatchObject({ status: 'ok', observation: { authentication: 'verified', contextRef: ctx.accountRef }, data: {
+      recognized: true, checkoutUrl: addressUrl, sessionGeneration: 1,
+      addresses: [{ summary: 'Fixture Home, 123 Example St, Seattle WA 98101', selected: true, addressRef: expect.stringMatching(/^[a-f0-9]{64}$/), fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/) }],
+      diagnostics: { fields: [{ name: 'addressId', type: 'radio' }, { name: 'addressToken', type: 'hidden', visible: false }], controls: [{ name: 'useAddress', label: 'Use this address', path: '/checkout/p/p-106-9344849-4773810/address' }] },
+    } });
+    expect(JSON.stringify(result)).not.toMatch(/SECRET_|Hidden address/);
+    const again = await provider.read('checkout_addresses_get', { url: addressUrl }, ctx);
+    expect((again.data as {revision:string}).revision).toBe((result.data as {revision:string}).revision);
+    expect(enteredReview).toBe(0); expect(clicks).toBe(0);
+  });
+  it("reports unrecognized address layouts and duplicate identities as incomplete", async () => {
+    const addressUrl = 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address';
+    await page.route('**/checkout/p/*/address', (route) => route.fulfill({ contentType: 'text/html', body: `${greeting}<main id="checkout-addresses"><button>Use this address</button></main>` }));
+    expect(await provider.read('checkout_addresses_get', { url: addressUrl }, ctx)).toMatchObject({ status: 'partial', data: { recognized: false, addresses: [] }, coverage: { complete: false, missing: ['saved_address_layout'] } });
+    await page.route('**/checkout/p/*/address', (route) => route.fulfill({ contentType: 'text/html', body: `${greeting}<div class="displayAddressDiv">Fixture Home</div><div class="displayAddressDiv">Fixture Home</div>` }));
+    expect(await provider.read('checkout_addresses_get', { url: addressUrl }, ctx)).toMatchObject({ status: 'partial', coverage: { complete: false, missing: ['unique_address_identity'] } });
+    expect(clicks).toBe(0);
+  });
+  it.each([false, true])("returns only safe failure diagnostics when checkout authentication is unverified (signin=%s)", async (signin) => {
+    const addressUrl = 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address';
+    await page.route('**/checkout/p/*/address', (route) => route.fulfill({ contentType: 'text/html', body: `<div id="address-book-entry-0"><div class="displayAddressDiv">PRIVATE_ADDRESS_TEXT</div><form action="/checkout/p/p-106-9344849-4773810/address?token=SECRET_TOKEN"><input type="hidden" name="addressId" value="SECRET_ADDRESS"><button name="useAddress">Use this address PRIVATE_LABEL</button></form></div>${signin ? '<form name="signIn"><input name="email" value="PRIVATE_EMAIL"><input type="password" value="PRIVATE_PASSWORD"><input name="otpCode" value="PRIVATE_OTP"></form>' : ''}` }));
+    const result = await provider.read('checkout_addresses_get', { url: addressUrl }, ctx);
+    expect(result).toMatchObject({ status: 'requires_user_action', data: { authenticationVerified: false, diagnostics: {
+      page: { origin: 'https://www.amazon.com', path: '/checkout/p/p-106-9344849-4773810/address', kind: signin ? 'challenge' : 'ready' },
+      greetingPresent: false, signinFormPresent: signin, passwordFormPresent: signin, mfaFormPresent: signin,
+      addressElementCount: 2, fields: [{ name: 'addressId', type: 'hidden' }], controls: [{ name: 'useAddress', path: '/checkout/p/p-106-9344849-4773810/address' }],
+    } } });
+    expect(JSON.stringify(result)).not.toMatch(/PRIVATE_|SECRET_|summary|fingerprint|revision|addressRef/);
+    expect(result.observation?.authentication).toBeUndefined(); expect(clicks).toBe(0);
+  });
+  it("reports bounded modern address-panel structure without exposing text or attribute values", async () => {
+    const addressUrl = 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address';
+    const modernUrl = `${addressUrl}/shiptodestination?token=SECRET_QUERY`;
+    await page.route('**/checkout/p/*/address', (route) => route.fulfill({ contentType: 'text/html', body: `<meta http-equiv="refresh" content="0;url=${modernUrl}">` }));
+    await page.route('**/shiptodestination?*', (route) => route.fulfill({ contentType: 'text/html', body: `<section id="shipping-address-selection-panel"><div id="address-card-0" class="address-card selected" role="radio" aria-checked="true" data-address-id="SECRET_ID">PRIVATE_ADDRESS<input type="radio" name="addressSelection" value="SECRET_VALUE"></div><div style="display:none" id="hidden-card">PRIVATE_HIDDEN</div>${'<div class="extra-card">PRIVATE_EXTRA</div>'.repeat(130)}</section><button id="checkout-primary-continue-button-id" formaction="${addressUrl}/shiptodestination?csrf=SECRET_CSRF">PRIVATE_BUTTON</button>` }));
+    const result = await provider.read('checkout_addresses_get', { url: addressUrl }, ctx);
+    expect(result).toMatchObject({ status: 'requires_user_action', data: { authenticationVerified: false, diagnostics: { page: { path: '/checkout/p/p-106-9344849-4773810/address/shiptodestination', queryKeys: ['token'] } } } });
+    const structure = (result.data as {diagnostics:{structure:{id?:string}[]}}).diagnostics.structure;
+    expect(structure.find((node) => node.id === 'address-card-0')).toMatchObject({ depth: 1, tag: 'div', id: 'address-card-0', classNames: ['address-card', 'selected'], role: 'radio', ariaChecked: true, attributeNames: ['id', 'class', 'role', 'aria-checked', 'data-address-id'] });
+    expect(structure[0]).toMatchObject({ id: 'checkout-primary-continue-button-id', path: '/checkout/p/p-106-9344849-4773810/address/shiptodestination' });
+    expect(structure).toHaveLength(120);
+    expect(JSON.stringify(result)).not.toMatch(/PRIVATE_|SECRET_|hidden-card/);
+  });
+  it("verifies headerless modern saved checkout through a fresh fixed account page in the same read", async () => {
+    const addressUrl = 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address?pipelineType=Chewbacca&isBuyNow=1&referrer=checkout';
+    let accountVisits = 0; let addressVisits = 0;
+    const observedAddressUrls: string[] = [];
+    const modern = '<section id="shipping-address-selection-panel"><fieldset><div role="radiogroup"><span id="select-destination-on-sasp-desktop-panel-id-fixture" data-action="select-destination-on-sasp-desktop-panel" data-select-destination-on-sasp-desktop-panel="SECRET_DATA"><div class="a-radio" data-a-input-name="address"><label><input type="radio" name="destinationSubmissionUrl" checked value="/checkout/p/p-106-9344849-4773810/address/select?destinationId=SECRET_ADDRESS&amp;csrf=SECRET_CSRF">Fixture Home, 123 Example St, Seattle WA 98101</label></div></span></div></fieldset></section><span id="checkout-primary-continue-button-id"><input type="submit" name="continueAddress" data-testid="address-continue"><span id="button-announce">Deliver to this address</span></span>';
+    await page.route('**/checkout/p/*/address?*', (route) => { addressVisits++; observedAddressUrls.push(route.request().url()); return route.fulfill({ contentType: 'text/html', body: modern }); });
+    await page.route('**/gp/your-account/order-history', (route) => { accountVisits++; return route.fulfill({ contentType: 'text/html', body: greeting }); });
+    const result = await provider.read('checkout_addresses_get', { url: addressUrl }, ctx);
+    expect(result).toMatchObject({ status: 'ok', observation: { authentication: 'verified' }, data: { authenticationEvidence: 'same_run_account_page_and_saved_checkout', addresses: [{ summary: 'Fixture Home, 123 Example St, Seattle WA 98101', selected: true }] } });
+    expect(accountVisits).toBe(1); expect(addressVisits).toBe(2);
+    expect(observedAddressUrls.every((value) => new URL(value).searchParams.get('isBuyNow') === '1' && new URL(value).searchParams.get('pipelineType') === 'Chewbacca')).toBe(true);
+    expect(result).toMatchObject({ data: { checkoutUrl: 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address?isBuyNow=1&pipelineType=Chewbacca&referrer=checkout' } });
+    expect(result).toMatchObject({ data: { diagnostics: { authenticationLayout: { modernAddressControls: [{ dataAction: 'select-destination-on-sasp-desktop-panel', radioName: 'destinationSubmissionUrl', destination: { path: '/checkout/p/p-106-9344849-4773810/address/select', queryKeys: ['destinationId', 'csrf'] } }], primaryContinueControl: { name: 'continueAddress', dataTestId: 'address-continue', type: 'submit' } } } } });
+    expect(JSON.stringify(result)).not.toMatch(/SECRET_/);
+    await provider.read('checkout_addresses_get', { url: addressUrl }, ctx);
+    expect(accountVisits).toBe(2); expect(addressVisits).toBe(4); expect(clicks).toBe(0);
+    const changedRouting = await provider.read('checkout_addresses_get', { url: addressUrl.replace('isBuyNow=1', 'isBuyNow=0') }, ctx);
+    expect((changedRouting.data as {contextFingerprint:string}).contextFingerprint).not.toBe((result.data as {contextFingerprint:string}).contextFingerprint);
+    expect((changedRouting.data as {revision:string}).revision).not.toBe((result.data as {revision:string}).revision);
+    await page.route('**/checkout/p/*/address?*', (route) => route.fulfill({ contentType: 'text/html', body: modern.replace(/value="\/checkout[^\"]*"/, 'value="SECRET_OPAQUE"') }));
+    const opaquePayload = await provider.read('checkout_addresses_get', { url: addressUrl }, ctx);
+    expect(JSON.stringify(opaquePayload)).not.toMatch(/SECRET_OPAQUE/);
+    const controls = (opaquePayload.data as {diagnostics:{authenticationLayout:{modernAddressControls:{destination?:unknown}[]}}}).diagnostics.authenticationLayout.modernAddressControls;
+    expect(controls[0]?.destination).toBeUndefined();
+  });
+  it.each(['account_unverified', 'checkout_signin', 'layout_missing'])('withholds private modern summaries when bridge proof fails: %s', async (failure) => {
+    const addressUrl = 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address';
+    let addressVisits = 0; let accountVisits = 0;
+    const modern = '<section id="shipping-address-selection-panel"><span id="select-destination-on-sasp-desktop-panel-id-fixture" data-select-destination-on-sasp-desktop-panel="SECRET"><div class="a-radio" data-a-input-name="address"><label><input type="radio">PRIVATE_HOME</label></div></span></section>';
+    await page.route('**/checkout/p/*/address', (route) => { addressVisits++; return route.fulfill({ contentType: 'text/html', body: failure === 'layout_missing' ? '<div class="displayAddressDiv">PRIVATE_HOME</div>' : addressVisits > 1 && failure === 'checkout_signin' ? '<form name="signIn"><input type="password"></form>' : modern }); });
+    await page.route('**/gp/your-account/order-history', (route) => { accountVisits++; return route.fulfill({ contentType: 'text/html', body: failure === 'account_unverified' ? `${greeting}<form name="signIn"><input type="password"></form>` : greeting }); });
+    const result = await provider.read('checkout_addresses_get', { url: addressUrl }, ctx);
+    expect(result.status).toBe('requires_user_action');
+    expect(JSON.stringify(result)).not.toMatch(/PRIVATE_HOME|SECRET|summary|fingerprint|addressRef/);
+    expect(result.observation?.authentication).toBeUndefined(); expect(clicks).toBe(0);
+    if (failure === 'layout_missing') expect(accountVisits).toBe(0);
+  });
+  it.each(['https://untrusted.example/checkout/p/p-106-9344849-4773810/address', 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address?unsafe=1', 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/review'])("rejects unsupported address-read URLs before navigating: %s", async (target) => {
+    expect(await provider.read('checkout_addresses_get', { url: target }, ctx)).toMatchObject({ status: 'unsupported', error: { code: 'invalid_address_step_url' } });
+    expect(page.url()).toBe('about:blank');
+  });
+  it("hands off a known headerless Amazon address step without claiming authentication or producing terms", async () => {
     omitProductEvidence();
     const addressUrl = 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address';
     await page.route('**/checkout/entry/buynow', (route) => {
       enteredReview++;
-      return route.fulfill({ contentType: 'text/html', body: `<meta http-equiv="refresh" content="0;url=${addressUrl}?ref_=checkout">` });
+      return route.fulfill({ contentType: 'text/html', body: `<meta http-equiv="refresh" content="0;url=${addressUrl}?pipelineType=Chewbacca&amp;isBuyNow=1&amp;referrer=checkout">` });
     });
+    await page.route('**/checkout/p/*/address?*', (route) => route.fulfill({ contentType: 'text/html', body: '<main id="shipping-address-selection-panel">Select an address</main>' }));
     const result = await provider.read('purchase_buy_now_prepare', productInput, ctx);
-    expect(result).toEqual({ status: 'requires_user_action', error: { code: 'checkout_address_selection_required', retryable: false }, action: { kind: 'checkout_address_selection', url: addressUrl } });
+    expect(result).toEqual({ status: 'requires_user_action', error: { code: 'checkout_address_selection_required', retryable: false }, action: { kind: 'checkout_address_selection', url: `${addressUrl}?isBuyNow=1&pipelineType=Chewbacca&referrer=checkout` } });
     expect(result.data).toBeUndefined(); expect(enteredReview).toBe(1); expect(clicks).toBe(0);
+    expect(result.observation?.authentication).toBeUndefined();
+  });
+  it("retains authentication challenges on a headerless address-step handoff", async () => {
+    omitProductEvidence();
+    const addressUrl = 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address';
+    await page.route('**/checkout/entry/buynow', (route) => route.fulfill({ contentType: 'text/html', body: `<meta http-equiv="refresh" content="0;url=${addressUrl}">` }));
+    await page.route('**/checkout/p/*/address', (route) => route.fulfill({ contentType: 'text/html', body: '<form name="signIn"><input type="password"></form>' }));
+    const result = await provider.read('purchase_buy_now_prepare', productInput, ctx);
+    expect(result).toMatchObject({ status: 'requires_user_action', error: { code: 'challenge_signin' } });
+    expect(result.action?.kind).not.toBe('checkout_address_selection'); expect(result.data).toBeUndefined(); expect(clicks).toBe(0);
+  });
+  it("reports the bounded Amazon redirect pathname without its query values", async () => {
+    const addressUrl = 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address';
+    await page.route('**/checkout/p/*/address', (route) => route.fulfill({ contentType: 'text/html', body: '<meta http-equiv="refresh" content="0;url=https://www.amazon.com/gp/buy/expired-checkout?ref=SECRET_QUERY">' }));
+    await page.route('**/gp/buy/expired-checkout?*', (route) => route.fulfill({ contentType: 'text/html', body: '<main>PRIVATE_BODY</main>' }));
+    const result = await provider.read('checkout_addresses_get', { url: addressUrl }, ctx);
+    expect(result).toMatchObject({ status: 'requires_user_action', data: { diagnostics: { page: { origin: 'https://www.amazon.com', path: '/gp/buy/expired-checkout', queryKeys: ['ref'] } } } });
+    expect(JSON.stringify(result)).not.toMatch(/SECRET_QUERY|PRIVATE_BODY/);
   });
   it("rejects an untrusted address-step destination without offering a handoff", async () => {
     omitProductEvidence();

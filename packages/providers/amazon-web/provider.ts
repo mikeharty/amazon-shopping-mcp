@@ -12,7 +12,8 @@ import {
 } from "../../browser-runtime/index.js";
 import { extractCart } from "./cart/index.js";
 import { extractCheckout, prepareCheckout } from "./checkout/index.js";
-import { buyingOptions, preparePurchase, readPurchasePreconditions, submitPurchase } from "./checkout/purchasing.js";
+import { buyingOptions, preparePurchase, readCheckoutAddresses, readPurchasePreconditions, submitPurchase } from "./checkout/purchasing.js";
+import { reconcileCurrentAddress, selectCheckoutAddress } from "./checkout/addresses.js";
 import { purchaseCommitKinds } from "../../core/purchasing.js";
 import {
   extractCategory,
@@ -57,6 +58,7 @@ export const AMAZON_WEB_READ_KINDS = [
   "deals_search",
 ] as const;
 export const AMAZON_WEB_MUTATION_KINDS = [
+  "checkout_address_select",
   "cart_add",
   "cart_set_quantity",
   "cart_remove",
@@ -87,12 +89,16 @@ export class AmazonWebProvider implements ShoppingProvider {
     input: Record<string, unknown>,
     context: ProviderContext,
   ): Promise<Result> {
-    if (["buying_options_get", "purchase_checkout_prepare", "purchase_buy_now_prepare", "purchase_subscriptions_prepare", "checkout_submit_preconditions", "subscriptions_submit_preconditions"].includes(kind)) {
+    if (["checkout_addresses_get", "buying_options_get", "purchase_checkout_prepare", "purchase_buy_now_prepare", "purchase_subscriptions_prepare", "checkout_submit_preconditions", "subscriptions_submit_preconditions"].includes(kind)) {
       if (this.runner.sessionGeneration !== undefined && this.runner.sessionGeneration !== context.sessionGeneration)
         return staleSession(this.runner.sessionGeneration);
       try {
         return await this.runner.run(async (page) => {
           if (kind === "buying_options_get") return buyingOptions(page, input.asin);
+          if (kind === "checkout_addresses_get") {
+            if (input.inspectCurrent === true && input.reconcileCurrent === true) return { status: 'unsupported', error: { code: 'incompatible_address_read_modes', retryable: false } };
+            return input.reconcileCurrent === true ? reconcileCurrentAddress(page, input, context) : readCheckoutAddresses(page, input, context);
+          }
           if (kind.endsWith("_preconditions")) return readPurchasePreconditions(page, input);
           return preparePurchase(page, kind.slice("purchase_".length), input, context);
         });
@@ -282,6 +288,7 @@ export class AmazonWebProvider implements ShoppingProvider {
     try {
       return await this.runner.run(async (page) => {
         if ((purchaseCommitKinds as readonly string[]).includes(kind)) return submitPurchase(page, kind, terms, context);
+        if (kind === 'checkout_address_select') return selectCheckoutAddress(page, terms, context);
         if (kind === "cart_add") return this.addToCart(page, terms, context);
         await gotoAndCheck(page, "https://www.amazon.com/gp/cart/view.html");
         const before = await extractCart(page);
