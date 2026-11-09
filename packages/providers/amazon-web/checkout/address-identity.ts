@@ -56,7 +56,8 @@ export function samePhysicalAddress(a: ShippingIdentity | undefined, b: Shipping
   return Boolean(left && right && left.recipient === right.recipient && left.city === right.city && left.region === right.region && left.postalCode === right.postalCode && left.country === right.country && left.addressLines.join(' ') === right.addressLines.join(' '));
 }
 
-export type AppliedShippingEvidence = { lines: string[]; neighborHeadingLines?: string[]; neighborPanelLines?: string[]; knownHeaderLabels?: string[]; physicalIdentity?: ShippingIdentity; savedAddressIdFingerprint?: string };
+export type KnownDeliveryHeaderControl = { tag: string; id: string; ancestorIds: string[]; path?: string; queryKeys: string[]; text: string; ariaLabel: string };
+export type AppliedShippingEvidence = { lines: string[]; neighborHeadingLines?: string[]; neighborPanelLines?: string[]; knownHeaderLabels?: string[]; knownHeaderControls?: KnownDeliveryHeaderControl[]; physicalIdentity?: ShippingIdentity; savedAddressIdFingerprint?: string };
 
 /** Owner-private read evidence only. Caller owns authentication and checkout-context checks. */
 export async function readAppliedShippingEvidence(page: Page): Promise<AppliedShippingEvidence | undefined> {
@@ -92,28 +93,44 @@ export async function readAppliedShippingEvidence(page: Page): Promise<AppliedSh
     if (neighborPanelLines.length > 30 || neighborPanelLines.some((line) => line.length > 1000)) return undefined;
     // This observed link is the selected-recipient announcement, not an action
     // to execute. No other interactive control is admitted as recipient proof.
-    const headerLinks = panel ? Array.from(panel.querySelectorAll<HTMLAnchorElement>('a#change-delivery-link')).filter(visible) : [];
+    const experiences = Array.from(document.querySelectorAll<HTMLElement>('#checkout-experience-container')).filter(visible);
+    const experience = experiences.length === 1 && experiences[0]!.contains(root) ? experiences[0] : undefined;
+    const headerLinks = Array.from(document.querySelectorAll<HTMLElement>('#change-delivery-link')).filter(visible);
     const knownHeaderLabels: string[] = [];
-    if (headerLinks.length === 1) {
+    const knownHeaderControls: { tag: string; id: string; ancestorIds: string[]; path?: string; queryKeys: string[]; text: string; ariaLabel: string }[] = [];
+    if (headerLinks.length === 1 && experience?.contains(headerLinks[0]!)) {
       const link = headerLinks[0]!;
+      const labelText = (value: string) => value.replace(/\s+/g, ' ').trim().slice(0, 1000);
+      const text = labelText(Array.from(link.childNodes).map((node) => renderedText(node)).join(''));
+      const ariaLabel = labelText(link.getAttribute('aria-label') ?? '');
+      const ancestorIds: string[] = [];
+      for (let node: Element | null = link.parentElement; node && ancestorIds.length < 8; node = node.parentElement) {
+        if (/^[A-Za-z][A-Za-z0-9_.:-]{0,119}$/.test(node.id)) ancestorIds.push(node.id);
+        if (node === experience) break;
+      }
+      let path: string | undefined; let queryKeys: string[] = [];
       try {
-        const current = new URL(location.href); const destination = new URL(link.href, location.href);
+        const current = new URL(location.href); const destination = new URL(link.getAttribute('href') ?? '', location.href);
+        if (destination.origin === 'https://www.amazon.com' && !destination.username && !destination.password) {
+          path = destination.pathname;
+          queryKeys = [...new Set(destination.searchParams.keys())].filter((key) => /^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/.test(key)).slice(0, 30);
+        }
         const purchase = current.pathname.match(/^\/checkout\/p\/(p-\d{3}-\d{7}-\d{7})\//)?.[1];
         const allowed = ['ref', 'ref_', 'referrer', 'pipelineType', 'isBuyNow', 'hasWorkingJavascript', 'purchaseId', 'checkoutSessionId'];
-        const safe = purchase && current.origin === 'https://www.amazon.com' && destination.origin === current.origin && !destination.username && !destination.password && !destination.hash && destination.pathname === `/checkout/p/${purchase}/address` &&
+        const safe = link instanceof HTMLAnchorElement && purchase && current.origin === 'https://www.amazon.com' && destination.origin === current.origin && !destination.username && !destination.password && !destination.hash && destination.pathname === `/checkout/p/${purchase}/address` &&
           [...destination.searchParams.keys()].every((key) => allowed.includes(key) && destination.searchParams.getAll(key).length === 1) &&
           ['pipelineType', 'isBuyNow', 'purchaseId', 'checkoutSessionId'].every((key) => !destination.searchParams.has(key) || JSON.stringify(destination.searchParams.getAll(key)) === JSON.stringify(current.searchParams.getAll(key)));
         if (safe) {
-          const text = Array.from(link.childNodes).map((node) => renderedText(node)).join('');
-          for (const value of [text, link.getAttribute('aria-label') ?? '']) {
+          for (const value of [text, ariaLabel]) {
             const label = value.replace(/\s+/g, ' ').trim();
             if (label && label.length <= 1000 && !knownHeaderLabels.includes(label)) knownHeaderLabels.push(label);
           }
         }
       } catch { /* Unsafe or unsupported links never establish recipient evidence. */ }
+      knownHeaderControls.push({ tag: link.tagName.toLowerCase(), id: link.id, ancestorIds, path, queryKeys, text, ariaLabel });
     }
     const id = root.closest('[data-selected-address-id], [data-address-id]') ?? root.querySelector('[data-selected-address-id], [data-address-id]');
-    return { lines, neighborHeadingLines, neighborPanelLines, knownHeaderLabels, ambiguousHeader: headerLinks.length > 1, savedAddressId: id?.getAttribute('data-selected-address-id') ?? id?.getAttribute('data-address-id') ?? undefined };
+    return { lines, neighborHeadingLines, neighborPanelLines, knownHeaderLabels, knownHeaderControls, ambiguousHeader: headerLinks.length > 1, savedAddressId: id?.getAttribute('data-selected-address-id') ?? id?.getAttribute('data-address-id') ?? undefined };
   });
   if (!raw) return undefined;
   const recipients = [...new Set([...raw.neighborHeadingLines, ...raw.neighborPanelLines, ...raw.knownHeaderLabels].flatMap((line) => {
@@ -126,7 +143,7 @@ export async function readAppliedShippingEvidence(page: Page): Promise<AppliedSh
     if (physicalIdentity && physicalIdentity.recipient !== normalized(recipients[0]!)) physicalIdentity = undefined;
     else physicalIdentity ??= parseAddressLines([recipients[0]!, ...raw.lines]);
   }
-  return { lines: raw.lines, ...(raw.neighborHeadingLines.length ? { neighborHeadingLines: raw.neighborHeadingLines } : {}), ...(raw.neighborPanelLines.length ? { neighborPanelLines: raw.neighborPanelLines } : {}), ...(raw.knownHeaderLabels.length ? { knownHeaderLabels: raw.knownHeaderLabels } : {}), ...(physicalIdentity ? { physicalIdentity } : {}), ...(raw.savedAddressId ? { savedAddressIdFingerprint: digest(raw.savedAddressId) } : {}) };
+  return { lines: raw.lines, ...(raw.neighborHeadingLines.length ? { neighborHeadingLines: raw.neighborHeadingLines } : {}), ...(raw.neighborPanelLines.length ? { neighborPanelLines: raw.neighborPanelLines } : {}), ...(raw.knownHeaderLabels.length ? { knownHeaderLabels: raw.knownHeaderLabels } : {}), ...(raw.knownHeaderControls.length ? { knownHeaderControls: raw.knownHeaderControls } : {}), ...(physicalIdentity ? { physicalIdentity } : {}), ...(raw.savedAddressId ? { savedAddressIdFingerprint: digest(raw.savedAddressId) } : {}) };
 }
 
 /** Strict write postcondition: rendered evidence alone never establishes a complete identity. */

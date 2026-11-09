@@ -149,23 +149,35 @@ describe('Independent rendered shipping proof', () => {
     expect(samePhysicalAddress((await read(panelWithHeading('<span>Delivering to Jamie Example</span>')))?.physicalIdentity, parseAddressLines(home))).toBe(true);
     expect(await read('<span>Delivering to Jamie Example</span>' + panelWithHeading(''))).toBeUndefined();
   });
-  async function readLinkedHeader(header: string) {
-    const page = await browser.newPage();
+  async function readLinkedHeader(header: string, outsideExperience = false) {
+    const context = await browser.newContext({ offline: true }); const page = await context.newPage();
     try {
-      await page.route('**/*', (route) => route.fulfill({ contentType: 'text/html', body: panelWithHeading(header) }));
+      const body = (outsideExperience ? header : '') + '<main id="checkout-experience-container">' + (outsideExperience ? '' : '<header id="delivery-header">' + header + '</header>') + panelWithHeading('') + '</main>';
+      await page.route('**/*', (route) => route.fulfill({ contentType: 'text/html', body }));
       await page.goto('https://www.amazon.com/checkout/p/p-123-1111111-2222222/spc?pipelineType=Chewbacca&isBuyNow=1');
       return await readAppliedShippingEvidence(page);
-    } finally { await page.close(); }
+    } finally { await context.close(); }
   }
   it('reads the known visible same-checkout recipient link without clicking', async () => {
     const result = await readLinkedHeader('<a id="change-delivery-link" href="/checkout/p/p-123-1111111-2222222/address?pipelineType=Chewbacca&amp;isBuyNow=1">Delivering to Jamie Example<span style="display:none">SECRET_HIDDEN</span></a>');
     expect(samePhysicalAddress(result?.physicalIdentity, parseAddressLines(home))).toBe(true);
     expect(result?.knownHeaderLabels).toEqual(['Delivering to Jamie Example']);
+    expect(result?.knownHeaderControls).toEqual([{ tag: 'a', id: 'change-delivery-link', ancestorIds: ['delivery-header', 'checkout-experience-container'], path: '/checkout/p/p-123-1111111-2222222/address', queryKeys: ['pipelineType', 'isBuyNow'], text: 'Delivering to Jamie Example', ariaLabel: '' }]);
   });
   it('returns a noncanonical known header label as partial diagnostic evidence only', async () => {
     const result = await readLinkedHeader('<a id="change-delivery-link" href="/checkout/p/p-123-1111111-2222222/address">Change shipping destination</a>');
     expect(result?.knownHeaderLabels).toEqual(['Change shipping destination']);
     expect(result?.physicalIdentity).toBeUndefined();
+  });
+  it('rejects the known recipient link outside the same checkout experience', async () => {
+    const result = await readLinkedHeader('<a id="change-delivery-link" href="/checkout/p/p-123-1111111-2222222/address">Delivering to Jamie Example</a>', true);
+    expect(result?.physicalIdentity).toBeUndefined(); expect(result?.knownHeaderControls).toBeUndefined();
+  });
+  it('returns safe structural metadata for the named control without returning query tokens', async () => {
+    const result = await readLinkedHeader('<a id="change-delivery-link" href="/checkout/p/p-123-1111111-2222222/address?token=SECRET_QUERY" aria-label="Selected delivery destination">Change shipping destination<input type="hidden" value="SECRET_INPUT"></a>');
+    expect(result?.physicalIdentity).toBeUndefined();
+    expect(result?.knownHeaderControls?.[0]).toMatchObject({ path: '/checkout/p/p-123-1111111-2222222/address', queryKeys: ['token'], text: 'Change shipping destination', ariaLabel: 'Selected delivery destination' });
+    expect(JSON.stringify(result)).not.toContain('SECRET_');
   });
   it.each([
     '<a id="change-delivery-link" href="https://evil.example/checkout/p/p-123-1111111-2222222/address">Delivering to Jamie Example</a>',
