@@ -27,6 +27,27 @@ not expose complete evidence stop with `unsupported` or a human handoff.
    `expectedSellerId`, `expectedCondition`, and a stable `idempotencyKey`.
    It enters a supported Amazon review page without submitting an order. A
    button with an instant-order destination is rejected.
+
+   Some ordinary one-time product pages omit explicit condition or purchase-mode
+   controls. For a requested `New` Buy It Now item, preparation may enter the
+   observed `/checkout/entry/buynow` review route when the seller matches exactly.
+   An observed condition mismatch or present but conflicting, unselected, or
+   ambiguous mode controls still block entry. The requested terms do not fill in
+   missing observations: the resulting review must independently establish the
+   exact ASIN, seller, New condition, one-time mode, quantity, and all remaining
+   checkout terms before an approval intent can be created. Subscription
+   preparation does not use this exception.
+
+   `buying_options_get` also exposes filtered layout diagnostics for unsupported
+   pages. These contain control IDs, labels, paths without URL queries, condition
+   phrases, form-field names without values, and canonical availability messages.
+   They are diagnostic evidence, not executable purchase terms.
+
+   If Amazon opens its address-selection step instead of review, preparation
+   returns `requires_user_action` with `checkout_address_selection_required` and
+   the observed Amazon handoff URL. It does not select or edit an address, create
+   an approval intent, or submit an order. The owner must complete that step
+   before a supported review can be prepared.
 3. Poll the same operation. Its completed result contains `intentId`, exact
    terms, expiry, and the private owner `reviewUrl`.
 4. The owner opens that link, signs in with the separate local owner token, and

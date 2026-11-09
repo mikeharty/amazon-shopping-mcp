@@ -61,11 +61,136 @@ describe("Purchasing through offline Amazon browser fixtures", () => {
     expect(result.status).toBe("ok");
     return purchaseTermsSchema.parse(result.data);
   }
+  function omitProductEvidence() {
+    product = product.replace('<span id="condition">New</span>', '').replace(/<label data-purchase-mode="[\s\S]*?<\/label>/g, '');
+  }
+  it("hands off a verified Amazon address step without producing terms or submitting", async () => {
+    omitProductEvidence();
+    const addressUrl = 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address';
+    await page.route('**/checkout/entry/buynow', (route) => {
+      enteredReview++;
+      return route.fulfill({ contentType: 'text/html', body: `<meta http-equiv="refresh" content="0;url=${addressUrl}?ref_=checkout">` });
+    });
+    const result = await provider.read('purchase_buy_now_prepare', productInput, ctx);
+    expect(result).toEqual({ status: 'requires_user_action', error: { code: 'checkout_address_selection_required', retryable: false }, action: { kind: 'checkout_address_selection', url: addressUrl } });
+    expect(result.data).toBeUndefined(); expect(enteredReview).toBe(1); expect(clicks).toBe(0);
+  });
+  it("rejects an untrusted address-step destination without offering a handoff", async () => {
+    omitProductEvidence();
+    await page.route('**/checkout/entry/buynow', (route) => route.fulfill({ contentType: 'text/html', body: '<meta http-equiv="refresh" content="0;url=https://untrusted.example/checkout/p/p-106-9344849-4773810/address">' }));
+    const result = await provider.read('purchase_buy_now_prepare', productInput, ctx);
+    expect(result).toMatchObject({ status: 'unsupported', error: { code: 'review_page_unavailable' } });
+    expect(result.action).toBeUndefined(); expect(result.data).toBeUndefined(); expect(clicks).toBe(0);
+  });
+  it("prepares a one-time-only page with missing pre-review terms only from complete matching review evidence", async () => {
+    omitProductEvidence();
+    const options = await provider.read("buying_options_get", { asin: "B0FIXTURE1" }, ctx);
+    expect(options).toMatchObject({ data: { modes: [] } });
+    expect((options.data as Record<string, unknown>).condition).toBeUndefined();
+    expect(await provider.read("purchase_buy_now_prepare", productInput, ctx)).toMatchObject({ status: "ok", data: { purchaseTerms: { lines: [{ asin: "B0FIXTURE1", sellerId: "A1FIXTURE", condition: "New", purchaseMode: "one_time", quantity: 1 }] } } });
+    expect(enteredReview).toBe(1); expect(clicks).toBe(0);
+  });
+  it.each([
+    ['condition', 'data-condition="New"', 'data-condition="Used"'],
+    ['missing condition', 'data-condition="New"', ''],
+    ['mode', 'data-purchase-mode="one_time"', 'data-purchase-mode="subscribe_and_save"'],
+    ['missing mode', 'data-purchase-mode="one_time"', ''],
+    ['ASIN', 'data-asin="B0FIXTURE1"', 'data-asin="B0WRONG001"'],
+    ['seller', 'data-seller-id="A1FIXTURE"', 'data-seller-id="WRONGSELLER"'],
+    ['quantity', 'data-quantity="1"', 'data-quantity="2"'],
+  ])("rejects incomplete or changed review %s after safe fallback entry", async (_, from, to) => {
+    omitProductEvidence(); review = review.replace(from, to);
+    const result = await provider.read("purchase_buy_now_prepare", productInput, ctx);
+    expect(result.status).not.toBe('ok');
+    expect(result.data).toBeUndefined(); expect(enteredReview).toBe(1); expect(clicks).toBe(0);
+  });
+  it.each([
+    ['cart route', 'action="/checkout/entry/buynow"', 'action="/checkout/entry/cart"'],
+    ['subscription route', 'action="/checkout/entry/buynow"', 'action="/checkout/entry/sns"'],
+    ['instant route', 'action="/checkout/entry/buynow"', 'action="/checkout/spc/place-order"'],
+    ['final label', 'value="Buy Now"', 'value="Place your order"'],
+    ['inline click', 'id="buy-now-button"', 'id="buy-now-button" onclick="return false"'],
+    ['inline submit', 'method="post"', 'method="post" onsubmit="return false"'],
+    ['unapproved query', 'action="/checkout/entry/buynow"', 'action="/checkout/entry/buynow?unsafe=1"'],
+  ])("rejects fallback %s before entering review", async (_, from, to) => {
+    omitProductEvidence(); product = product.replace(from, to);
+    expect(await provider.read("purchase_buy_now_prepare", productInput, ctx)).toMatchObject({ status: "unsupported", error: { code: "safe_review_control_unavailable" } });
+    expect(enteredReview).toBe(0); expect(clicks).toBe(0);
+  });
+  it.each(['unselected', 'conflicting', 'ambiguous'])("rejects present %s modes instead of using the empty-mode fallback", async (state) => {
+    omitProductEvidence();
+    const modes = state === 'unselected' ? '<div data-purchase-mode="one_time">One-time</div>' : state === 'conflicting' ? '<div data-purchase-mode="subscribe_and_save" aria-checked="true">Subscribe</div>' : '<div data-purchase-mode="one_time" aria-checked="true">One-time</div><div data-purchase-mode="subscribe_and_save" aria-checked="true">Subscribe</div>';
+    product += modes;
+    expect(await provider.read("purchase_buy_now_prepare", productInput, ctx)).toMatchObject({ status: "unsupported", error: { code: "purchase_mode_not_observed" } });
+    expect(enteredReview).toBe(0); expect(clicks).toBe(0);
+  });
+  it("never uses missing-evidence fallback for Used or subscription preparation", async () => {
+    omitProductEvidence();
+    expect(await provider.read("purchase_buy_now_prepare", { ...productInput, expectedCondition: 'Used' }, ctx)).toMatchObject({ status: 'conflict', error: { code: 'offer_changed' } });
+    expect(await provider.read("purchase_subscriptions_prepare", { ...productInput, frequency: '2' }, ctx)).toMatchObject({ status: 'conflict', error: { code: 'offer_changed' } });
+    expect(enteredReview).toBe(0); expect(clicks).toBe(0);
+  });
+  it("still blocks a known condition mismatch or seller mismatch when mode evidence is absent", async () => {
+    product = product.replace(/<label data-purchase-mode="[\s\S]*?<\/label>/g, '').replace('<span id="condition">New</span>', '<span id="condition">Used</span>');
+    expect(await provider.read("purchase_buy_now_prepare", productInput, ctx)).toMatchObject({ status: 'conflict', error: { code: 'offer_changed' } });
+    product = product.replace('<span id="condition">Used</span>', '');
+    expect(await provider.read("purchase_buy_now_prepare", { ...productInput, expectedSellerId: 'WRONGSELLER' }, ctx)).toMatchObject({ status: 'conflict', error: { code: 'offer_changed' } });
+    expect(enteredReview).toBe(0); expect(clicks).toBe(0);
+  });
 
   it("prepares Buy It Now into review without submitting a purchase", async () => {
     const result = await provider.read("purchase_buy_now_prepare", productInput, ctx);
     expect(result, JSON.stringify(result)).toMatchObject({ status: "ok", data: { commitKind: "checkout_submit", purchaseTerms: { flow: "buy_now", total: { minorUnits: 2675 } } }, observation: { authentication: "verified" } });
     expect(enteredReview).toBe(1); expect(clicks).toBe(0);
+  });
+  it("reports safe product layout diagnostics without inferring missing offer terms", async () => {
+    product = `${greeting}<input id="ASIN" value="B0FIXTURE1"><h1 id="productTitle">Fixture cable</h1>
+      <div id="buybox"><a id="sellerProfileTriggerId" href="https://www.amazon.com/sp?seller=A1FIXTURE">Seller</a>
+      <div id="newAccordionRow">New — deliver to Private Person, 123 Secret Street</div>
+      <div id="purchase-option"><label id="retail-option"><input id="retail-radio" type="radio" checked>Purchase</label></div>
+      <div id="deliveryBlockMessage">Selected delivery location Private Person, 123 Secret Street is beyond our shipping coverage</div>
+      <form action="/checkout/entry/buynow?offeringID=SECRET_TOKEN"><input type="hidden" name="offeringID.1" value="SECRET_OFFER"><input type="hidden" name="condition" value="PRIVATE_CONDITION"><input type="hidden" name="csrfToken" value="SECRET_CSRF"><input id="buy-now-button" type="submit" value="Buy Now"></form>
+      <a id="aod-ingress-link" href="/gp/product/ajax?aod=1&amp;token=SECRET_AOD">Other sellers</a>
+      <a href="/gp/offer-listing/B0FIXTURE1?token=SECRET_LISTING">See buying choices</a>
+      <a href="https://example.com/gp/offer-listing/B0FIXTURE1">External offer</a>
+      <a style="display:none" href="/gp/offer-listing/HIDDEN">Hidden offer</a></div>`;
+    const result = await provider.read("buying_options_get", { asin: "B0FIXTURE1" }, ctx);
+    expect(result).toMatchObject({ status: "ok", data: {
+      modes: [], diagnostics: {
+        purchaseControls: [{ id: "buy-now-button", label: "Buy Now", formPath: "/checkout/entry/buynow" }],
+        conditionEvidence: [{ selectorId: "newAccordionRow", text: "New" }],
+        availabilityMessages: ["Selected delivery location is beyond shipping coverage"],
+        modeContainers: [{ id: "retail-radio", parentId: "retail-option", containerIds: ["purchase-option", "retail-option", "retail-radio"] }],
+        offerFieldNames: ["offeringID.1", "condition"],
+        offerContainerIds: ["newAccordionRow"],
+        offerNavigationControls: [
+          { id: "aod-ingress-link", label: "Other sellers", path: "/gp/product/ajax" },
+          { label: "See buying choices", path: "/gp/offer-listing/B0FIXTURE1" },
+        ],
+      },
+    } });
+    expect((result.data as Record<string, unknown>).condition).toBeUndefined();
+    expect(JSON.stringify(result)).not.toMatch(/SECRET_|PRIVATE_CONDITION|csrfToken|Private Person|Secret Street|External offer|Hidden offer/);
+    expect(await provider.read("purchase_buy_now_prepare", productInput, ctx)).toMatchObject({ status: "unsupported", error: { code: "quantity_control_unavailable" } });
+    expect(enteredReview).toBe(0); expect(clicks).toBe(0);
+  });
+  it("keeps missing purchase-mode evidence blocking for subscription preparation", async () => {
+    product = product.replace(/<label data-purchase-mode="[\s\S]*?<\/label>/g, "");
+    expect(await provider.read("purchase_subscriptions_prepare", { ...productInput, frequency: '2' }, ctx)).toMatchObject({ status: "unsupported", error: { code: "purchase_mode_not_observed" } });
+    expect(enteredReview).toBe(0); expect(clicks).toBe(0);
+  });
+  it("uses the visible broad buybox region instead of an earlier hidden template", async () => {
+    product = `${greeting}<input id="ASIN" value="B0FIXTURE1">
+      <div id="buybox" style="display:none"><div id="condition">Used</div><input type="hidden" name="hiddenTemplateOffering" value="SECRET_TEMPLATE"></div>
+      <div id="rightCol"><div id="desktop_buybox">Partial nested buybox</div>
+      <div id="conditionCondition">New</div><input type="hidden" name="offeringID.1" value="SECRET_VISIBLE"></div>`;
+    const result = await provider.read("buying_options_get", { asin: "B0FIXTURE1" }, ctx);
+    expect(result).toMatchObject({ status: "ok", data: { diagnostics: {
+      conditionEvidence: [{ selectorId: "conditionCondition", text: "New" }],
+      offerFieldNames: ["offeringID.1"], offerContainerIds: ["conditionCondition"],
+    } } });
+    expect(JSON.stringify(result)).not.toMatch(/SECRET_|hiddenTemplateOffering/);
+    expect(enteredReview).toBe(0); expect(clicks).toBe(0);
   });
   it("prepares cart checkout from the exact cart revision", async () => {
     const cart = (await read("cart.html")).replace('</body>', '<form method="post" action="/checkout/entry/cart"><input type="submit" name="proceedToRetailCheckout" value="Proceed to checkout"></form></body>');

@@ -33,6 +33,31 @@ async function navigate(page: Page, url: string) {
   await checkPage(page);
 }
 
+function isAddressStepUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.origin === "https://www.amazon.com" && !url.username && !url.password && !url.hash &&
+      /^\/checkout\/p\/p-\d{3}-\d{7}-\d{7}\/address$/.test(url.pathname) &&
+      [...url.searchParams.keys()].every((key) => ["ref", "ref_", "pipelineType", "hasWorkingJavascript", "purchaseId", "checkoutSessionId"].includes(key));
+  } catch { return false; }
+}
+
+async function awaitReviewEntry(page: Page): Promise<Result | undefined> {
+  try {
+    await page.waitForURL((url) => isReviewUrl(url.toString()) || isAddressStepUrl(url.toString()) || url.origin !== "https://www.amazon.com", { waitUntil: "domcontentloaded", timeout: 10_000 });
+  } catch (error) {
+    if (error instanceof Error && error.name === "TimeoutError") return unsupported("review_page_unavailable");
+    throw error;
+  }
+  if (!isReviewUrl(page.url()) && !isAddressStepUrl(page.url())) return unsupported("review_page_unavailable");
+  await checkPage(page);
+  if (isAddressStepUrl(page.url())) {
+    const url = new URL(page.url());
+    return { status: "requires_user_action", error: { code: "checkout_address_selection_required", retryable: false }, action: { kind: "checkout_address_selection", url: `${url.origin}${url.pathname}` } };
+  }
+  return undefined;
+}
+
 export async function buyingOptions(page: Page, asin: unknown): Promise<Result> {
   if (typeof asin !== "string" || !/^[A-Z0-9]{10}$/.test(asin)) return unsupported("invalid_asin");
   await navigate(page, `https://www.amazon.com/dp/${asin}`);
@@ -49,12 +74,56 @@ async function inspectProduct(page: Page) {
     const modes = Array.from(document.querySelectorAll<HTMLElement>('[data-purchase-mode], #onetimePurchase, #subscribeAndSave'))
       .filter(visible).map((el) => ({ mode: el.dataset.purchaseMode ?? (el.id === "onetimePurchase" ? "one_time" : "subscribe_and_save"), selected: el.getAttribute("aria-checked") === "true" || Boolean(el.querySelector<HTMLInputElement>('input:checked')) }));
     const frequency = Array.from(document.querySelectorAll<HTMLSelectElement>('#sns-frequency, #rcx-subscribeFrequency, select[name="snsFrequency"]')).find(visible);
+    // Diagnostic observations only: these never establish executable offer terms.
+    // Prefer the rendered right column: nested buyboxes can cover only part of
+    // the offer, and earlier DOM matches can be hidden templates.
+    const buybox = Array.from(document.querySelectorAll('#rightCol')).find(visible)
+      ?? Array.from(document.querySelectorAll('#buybox, #desktop_buybox, #buybox_feature_div')).find(visible);
+    const clean = (value: string | null | undefined) => value?.replace(/\s+/g, " ").trim().slice(0, 160);
+    const safeId = (value: string) => /^[A-Za-z][A-Za-z0-9_:.-]{0,99}$/.test(value) ? value : undefined;
+    const purchaseControls = Array.from(document.querySelectorAll<HTMLElement>('#buy-now-button, #add-to-cart-button, #sns-review-button, input[name="snsReview"], input[name="submit.add-to-cart"], input[name="submit.buy-now"]')).filter(visible).map((el) => {
+      const input = el as HTMLInputElement;
+      const form = input.form ?? el.closest('form');
+      const destination = el.getAttribute('formaction') ?? form?.getAttribute('action') ?? el.getAttribute('href');
+      let formPath: string | undefined;
+      try { if (destination) formPath = new URL(destination, location.href).pathname; } catch { /* Invalid destinations are omitted. */ }
+      return { id: safeId(el.id), label: clean(el.getAttribute('aria-label') || (input.type === 'submit' ? input.value : el.textContent)), formPath };
+    });
+    const conditionEvidence = buybox ? Array.from(buybox.querySelectorAll<HTMLElement>('#condition, #newAccordionRow, #usedAccordionRow, #conditionCondition, [id*="condition"], [id*="Condition"]')).filter(visible).flatMap((el) => {
+      // Return condition phrases, not arbitrary account-personalized container text.
+      const matches = el.textContent?.match(/\b(?:New|Used(?:\s*[-–:]\s*(?:Like New|Very Good|Good|Acceptable))?|Renewed)\b/gi) ?? [];
+      return matches.map((value) => ({ selectorId: safeId(el.id), text: clean(value) }));
+    }) : [];
+    const messageText = Array.from(document.querySelectorAll('#availability, #outOfStock, #deliveryBlockMessage, #mir-layout-DELIVERY_BLOCK, #deliveryMessageMirId, #exports_desktop_qualifiedBuybox_tlc_feature_div, #merchant-info')).filter(visible).map((el) => el.textContent ?? '').concat(buybox && visible(buybox) ? buybox.textContent ?? '' : '').join(' ');
+    const messagePatterns: [RegExp, string][] = [
+      [/beyond (?:our |the )?shipping coverage/i, 'Selected delivery location is beyond shipping coverage'],
+      [/(?:cannot|can't|unable to) (?:be )?(?:ship|deliver)(?:ped|ed)?(?: to)?/i, 'Shipping or delivery restriction displayed'],
+      [/currently unavailable/i, 'Currently unavailable'],
+      [/out of stock/i, 'Out of stock'],
+      [/in stock/i, 'In stock'],
+    ];
+    const availabilityMessages = messagePatterns.filter(([pattern]) => pattern.test(messageText)).map(([, message]) => message);
+    const modeContainers = Array.from(document.querySelectorAll<HTMLElement>('[data-purchase-mode], #onetimePurchase, #subscribeAndSave, #buybox input[type="radio"], #desktop_buybox input[type="radio"], #rightCol input[type="radio"]')).filter(visible).map((el) => ({
+      id: safeId(el.id), parentId: safeId(el.parentElement?.id ?? ''),
+      containerIds: Array.from((el.closest('#buybox, #desktop_buybox, #rightCol') ?? el).querySelectorAll<HTMLElement>('[id]')).filter((node) => node.contains(el)).map((node) => safeId(node.id)).filter(Boolean),
+    }));
+    const offerFieldNames = buybox ? [...new Set(Array.from(buybox.querySelectorAll<HTMLInputElement>('input[type="hidden"][name]')).map((el) => el.name).filter((name) => /condition|offering|offerlisting/i.test(name) && safeId(name)))] : [];
+    const offerContainerIds = buybox ? Array.from(buybox.querySelectorAll<HTMLElement>('[id]')).filter(visible).map((el) => el.id).filter((id) => /new|condition|offer|buying|mode/i.test(id) && safeId(id)) : [];
+    const offerNavigationControls = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]')).filter(visible).flatMap((el) => {
+      let url: URL;
+      try { url = new URL(el.href, location.href); } catch { return []; }
+      if (url.origin !== 'https://www.amazon.com' || url.username || url.password) return [];
+      const ingress = el.closest('#aod-ingress-link, #buybox-see-all-buying-choices');
+      if (!url.pathname.startsWith('/gp/offer-listing') && url.searchParams.get('aod') !== '1' && !ingress) return [];
+      return [{ id: safeId(el.id || ingress?.id || ''), label: clean(el.getAttribute('aria-label') || el.textContent), path: url.pathname }];
+    });
     return {
       asin: document.querySelector<HTMLInputElement>("#ASIN")?.value,
       title: text("#productTitle"),
       sellerId: seller && visible(seller) ? new URL(seller.href).searchParams.get("seller")?.toUpperCase() : undefined,
       condition: text("#condition, #newAccordionRow .a-color-base, #usedAccordionRow .a-color-base"),
       modes,
+      diagnostics: { purchaseControls, conditionEvidence, availabilityMessages, modeContainers, offerFieldNames, offerContainerIds, offerNavigationControls },
       frequencies: frequency ? Array.from(frequency.options).filter((option) => !option.disabled && option.value).map((option) => ({ value: option.value, label: option.textContent?.trim() })) : [],
     };
   });
@@ -62,9 +131,9 @@ async function inspectProduct(page: Page) {
 
 // Inspect only rendered controls. A preparation may enter a review page but
 // cannot use an instant-order endpoint or a final purchase button.
-async function reviewControl(control: Locator): Promise<boolean> {
+async function reviewControl(control: Locator, requiredPath?: string): Promise<boolean> {
   if (await control.count() !== 1 || !await control.isVisible() || !await control.isEnabled()) return false;
-  return control.evaluate((element) => {
+  return control.evaluate((element, requiredPath) => {
     const el = element as HTMLInputElement;
     const form = el.form ?? el.closest("form");
     const destination = el.getAttribute("formaction") ?? form?.getAttribute("action") ?? (element as HTMLAnchorElement).getAttribute("href");
@@ -73,10 +142,11 @@ async function reviewControl(control: Locator): Promise<boolean> {
     const label = (el.value || element.textContent || el.getAttribute("aria-label") || "").trim();
     return url.origin === "https://www.amazon.com" && !url.username && !url.password && !url.hash &&
       ["/checkout/entry/buynow", "/checkout/entry/cart", "/checkout/entry/sns", "/checkout/p/review", "/gp/buy/spc/handlers/display.html"].includes(url.pathname) &&
+      (requiredPath === undefined || url.pathname === requiredPath) &&
       [...url.searchParams.keys()].every((key) => ["ref", "ref_", "pipelineType", "hasWorkingJavascript", "asin", "quantity", "offeringID", "frequency"].includes(key)) &&
       !el.hasAttribute("onclick") && !form?.hasAttribute("onsubmit") &&
       !/place (?:your )?order|confirm (?:your )?(?:order|subscription)|subscribe now|1.click/i.test(label);
-  });
+  }, requiredPath);
 }
 
 export async function preparePurchase(page: Page, kind: string, input: Record<string, unknown>, context: ProviderContext): Promise<Result> {
@@ -94,8 +164,8 @@ export async function preparePurchase(page: Page, kind: string, input: Record<st
       const control = page.locator('input[name="proceedToRetailCheckout"], button[name="proceedToRetailCheckout"], #sc-buy-box-ptc-button input');
       if (!await reviewControl(control)) return unsupported("checkout_review_control_unavailable");
       await control.click({ timeout: 5_000 });
-      await page.waitForURL((url) => isReviewUrl(url.toString()), { waitUntil: "domcontentloaded", timeout: 10_000 });
-      await checkPage(page);
+      const handoff = await awaitReviewEntry(page);
+      if (handoff) return handoff;
     }
   } else {
     flow = kind === "subscriptions_prepare" ? "subscribe_and_save" : "buy_now";
@@ -105,8 +175,14 @@ export async function preparePurchase(page: Page, kind: string, input: Record<st
     const mode = page.locator(`[data-purchase-mode="${requestedMode}"] input[type="radio"], ${flow === "buy_now" ? "#onetimePurchase" : "#subscribeAndSave"} input[type="radio"]`);
     if (await mode.count() === 1) await mode.check({ timeout: 5_000 });
     const observed = await inspectProduct(page);
-    if (observed.sellerId !== input.expectedSellerId || observed.condition !== input.expectedCondition) return conflict("offer_changed");
-    if (observed.modes.filter((item) => item.selected).length !== 1 || !observed.modes.some((item) => item.selected && item.mode === requestedMode)) return unsupported("purchase_mode_not_observed");
+    // Missing pre-review evidence may only enter the exact Buy It Now review
+    // route. The unchanged quote and identity checks must prove every term there.
+    const missingCondition = observed.condition === undefined || observed.condition === "";
+    const canReviewMissingEvidence = flow === "buy_now" && input.expectedCondition === "New" && observed.sellerId === input.expectedSellerId;
+    if (observed.sellerId !== input.expectedSellerId || (observed.condition !== input.expectedCondition && !(missingCondition && canReviewMissingEvidence))) return conflict("offer_changed");
+    const missingMode = observed.modes.length === 0;
+    if (!(missingMode && canReviewMissingEvidence) && (observed.modes.filter((item) => item.selected).length !== 1 || !observed.modes.some((item) => item.selected && item.mode === requestedMode))) return unsupported("purchase_mode_not_observed");
+    const reviewingMissingEvidence = canReviewMissingEvidence && (missingCondition || missingMode);
     const quantity = page.locator("#quantity");
     if (await quantity.count() !== 1) return unsupported("quantity_control_unavailable");
     await quantity.selectOption(String(input.quantity), { timeout: 5_000 });
@@ -119,10 +195,10 @@ export async function preparePurchase(page: Page, kind: string, input: Record<st
       if (await select.inputValue() !== input.frequency) return conflict("frequency_not_selected");
     }
     const control = page.locator(flow === "buy_now" ? "#buy-now-button" : '#sns-review-button, input[name="snsReview"]');
-    if (!await reviewControl(control)) return unsupported("safe_review_control_unavailable");
+    if (!await reviewControl(control, reviewingMissingEvidence ? "/checkout/entry/buynow" : undefined)) return unsupported("safe_review_control_unavailable");
     await control.click({ timeout: 5_000 });
-    await page.waitForURL((url) => isReviewUrl(url.toString()), { waitUntil: "domcontentloaded", timeout: 10_000 });
-    await checkPage(page);
+    const handoff = await awaitReviewEntry(page);
+    if (handoff) return handoff;
   }
   if (!isReviewUrl(page.url())) return unsupported("review_page_unavailable");
   const quote = await purchaseQuote(page, flow);
