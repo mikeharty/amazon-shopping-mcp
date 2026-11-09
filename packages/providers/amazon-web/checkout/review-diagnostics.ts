@@ -38,7 +38,7 @@ export function observeReviewNetworkMetadata(page: Page, reviewUrl: string) {
   const safePath = (path: string) => '/' + path.split('/').filter(Boolean).slice(0, 20).map((segment) => {
     if (segment === purchase) return '[purchase]';
     const words = segment.replace(/([A-Z])([A-Z][a-z])/g, '$1 $2').replace(/([a-z])([A-Z])/g, '$1 $2').split(/[ ._-]+/).map((word) => word.toLowerCase());
-    return /^[A-Za-z][A-Za-z._-]{0,59}$/.test(segment) && words.every((word) => vocabulary.has(word)) ? segment : '[segment]';
+    return /^[A-Za-z][A-Za-z._-]{0,59}$/.test(segment) && (words.every((word) => vocabulary.has(word)) || /^[a-z][a-z._-]{0,23}$/.test(segment)) ? segment : '[segment]';
   }).join('/');
   const onRequest = (request: Request) => {
     if (!active || pending.size >= 120 || entries.length >= 30) return;
@@ -369,7 +369,9 @@ export async function readModernReviewDiagnostics(page: Page, value: unknown, co
   if ((await classifyPage(page)).kind !== 'ready' || await hasAuthForm(page)) return authRequired();
   return {
     status: 'partial', data: { diagnosticOnly: true, executableTerms: false, contextFingerprint: digest({ routing: routingIdentity(page.url()), accountRef: context.accountRef, sessionGeneration: context.sessionGeneration }),
-      authenticationEvidence: 'same_run_account_page_and_modern_review', sections: raw, networkMetadata, missing: ['executable_purchase_terms_not_extracted'] },
+      authenticationEvidence: 'same_run_account_page_and_modern_review', sections: raw, networkMetadata, missing: ['executable_purchase_terms_not_extracted'],
+      instructions: 'This checkout layout is diagnostic only. No purchase intent or approval was created. Complete the order directly on Amazon or use a supported purchase adapter.' },
+    action: { kind: 'manual_checkout_review', url: value },
     observation: { source: 'amazon-web', observedAt: new Date().toISOString(), contextRef: context.accountRef, authentication: 'verified' },
     coverage: { complete: false, missing: ['executable_purchase_terms_not_extracted'] },
   };

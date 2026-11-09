@@ -22,6 +22,12 @@ describe('Metadata-only per-call response observation', () => {
     expect(result).toEqual([{ path: '/checkout/p/[purchase]/getCheckoutData/[segment]/[segment]', queryKeys: ['token', 'cookie'], resourceType: 'fetch', method: 'GET', status: 200, contentClass: 'json' }]);
     expect(JSON.stringify(result)).not.toMatch(/SECRET_|p-123|%70rivate/);
   });
+  it('preserves short literal endpoint words while masking identifiers and encoded segments', () => {
+    const s = surface(); const observer = observeReviewNetworkMetadata(s.page, url);
+    const req = s.request('https://www.amazon.com/hz/client/preferences/ABC123SECRET/%70rivate');
+    s.events.emit('request', req); s.events.emit('response', s.response(req));
+    expect(observer.close()[0]!.path).toBe('/hz/client/preferences/[segment]/[segment]');
+  });
   it('excludes requests started before the window, foreign origins/purchases/frames, credential URLs and other resource types', () => {
     const s = surface(); const prior = s.request('https://www.amazon.com/api/items'); s.events.emit('request', prior);
     const observer = observeReviewNetworkMetadata(s.page, url);
@@ -76,6 +82,8 @@ describe('Authenticated read-only network discovery integration', () => {
         const result = await readModernReviewDiagnostics(page, url, ctx);
         if (failure === 'ok') {
           expect(result).toMatchObject({ status: 'partial', data: { diagnosticOnly: true, executableTerms: false, networkMetadata: expect.arrayContaining([{ path: '/api/items', queryKeys: ['token'], resourceType: 'fetch', method: 'GET', status: 200, contentClass: 'json' }]) } });
+          expect(result.action).toEqual({ kind: 'manual_checkout_review', url });
+          expect((result.data as {instructions:string}).instructions).toContain('No purchase intent or approval was created');
           expect(JSON.stringify(result)).not.toMatch(/SECRET_QUERY|SECRET_RESPONSE|PRIVATE_BODY/);
         } else expect(result.data).toBeUndefined();
       }

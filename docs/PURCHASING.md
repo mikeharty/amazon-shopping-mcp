@@ -151,7 +151,13 @@ Modern `/checkout/p/p-…/spc` pages can be inspected through `checkout_get`
 with a fresh account authentication check. The current modern reader returns
 filtered diagnostic evidence only: selected delivery labels, displayed charge
 rows, public item identity where observed, and bounded metadata for unsupported
-item controls. It does not create executable purchase terms or an approval intent.
+item controls. It does not create executable purchase terms or an approval intent. Its
+`manual_checkout_review` action preserves the validated full Amazon checkout URL
+for direct human completion; it is not an MCP approval link or an automatic
+submission. Reconcile actual order state afterward before attempting any new
+purchase. A per-call, bounded response observer can report sanitized endpoint
+metadata for unsupported layouts; it reads no payloads or credentials and replays
+no requests.
 Missing condition, purchase mode, or item identity must not be filled from the
 requested purchase. Legacy supported review adapters retain their existing
 execution contract.
