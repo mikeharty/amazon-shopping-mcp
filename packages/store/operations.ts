@@ -35,8 +35,9 @@ export class OperationQueries {
     }
     const { rows } = await this.store.pool.query<{
       id: string; account_id: string; kind: string; mode: string; status: string;
-      revision: number; created_at: Date; updated_at: Date; started_at: Date | null; sort_timestamp: string;
+      revision: number; created_at: Date; updated_at: Date; started_at: Date | null; sort_timestamp: string; reconciled: boolean;
     }>(`SELECT id,account_id,kind,mode,status,revision,created_at,updated_at,started_at,
+      EXISTS(SELECT 1 FROM address_selection_reconciliations r WHERE r.operation_id=operations.id AND r.owner_id=operations.owner_id AND r.account_id=operations.account_id) AS reconciled,
       to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS sort_timestamp
       FROM operations WHERE owner_id=$1
       AND ($2::uuid IS NULL OR account_id=$2) AND ($3::text IS NULL OR status=$3)
@@ -50,7 +51,7 @@ export class OperationQueries {
     return {
       operations: page.map((row) => ({
         id: row.id, accountRef: row.account_id, kind: row.kind, mode: row.mode,
-        status: row.status, revision: row.revision, createdAt: row.created_at.toISOString(),
+        status: row.status, reconciled: row.reconciled, revision: row.revision, createdAt: row.created_at.toISOString(),
         updatedAt: row.updated_at.toISOString(), startedAt: row.started_at?.toISOString() ?? null,
       })),
       nextCursor: rows.length > args.limit && last ? this.store.vault.seal({
@@ -66,14 +67,15 @@ export class OperationQueries {
     if (!account) throw new DomainError("NOT_FOUND", "Initialize the local account with amazon_capabilities first", 404);
     const { rows: [row] } = await this.store.pool.query<{
       sampled_at: Date; last_heartbeat: Date | null; worker_online: boolean;
-      queued: number; active: number; uncertain: number; stale_active: number;
+      queued: number; active: number; uncertain: number; reconciled_uncertain: number; stale_active: number;
       oldest_queued_at: Date | null; queue_delayed: boolean;
     }>(`SELECT now() AS sampled_at,
       (SELECT max(heartbeat_at) FROM worker_health) AS last_heartbeat,
       EXISTS(SELECT 1 FROM worker_health WHERE heartbeat_at>now()-interval '45 seconds') AS worker_online,
       count(*) FILTER(WHERE status='queued')::int AS queued,
       count(*) FILTER(WHERE status IN ('working','dispatching'))::int AS active,
-      count(*) FILTER(WHERE status='outcome_unknown')::int AS uncertain,
+      count(*) FILTER(WHERE status='outcome_unknown' AND NOT EXISTS(SELECT 1 FROM address_selection_reconciliations r WHERE r.operation_id=operations.id AND r.owner_id=operations.owner_id AND r.account_id=operations.account_id))::int AS uncertain,
+      count(*) FILTER(WHERE status='outcome_unknown' AND EXISTS(SELECT 1 FROM address_selection_reconciliations r WHERE r.operation_id=operations.id AND r.owner_id=operations.owner_id AND r.account_id=operations.account_id))::int AS reconciled_uncertain,
       count(*) FILTER(WHERE status IN ('working','dispatching') AND
         (heartbeat_at IS NULL OR heartbeat_at<now()-interval '120 seconds'))::int AS stale_active,
       min(created_at) FILTER(WHERE status='queued') AS oldest_queued_at,
@@ -96,7 +98,7 @@ export class OperationQueries {
       account: { accountRef: account.id, enabled: account.enabled, quarantined: account.quarantined, sessionGeneration: account.session_generation },
       liveEnabled,
       worker: { online: row.worker_online, lastHeartbeatAt: row.last_heartbeat?.toISOString() ?? null, scope: "local-service" },
-      queue: { queued: row.queued, active: row.active, uncertain: row.uncertain, staleActive: row.stale_active, oldestQueuedAt: row.oldest_queued_at?.toISOString() ?? null },
+      queue: { queued: row.queued, active: row.active, uncertain: row.uncertain, reconciledUncertain: row.reconciled_uncertain, staleActive: row.stale_active, oldestQueuedAt: row.oldest_queued_at?.toISOString() ?? null },
       latestOperation: recent.operations[0] ?? null,
       issues,
       note: "Local configuration and journal health only. This does not contact Amazon, verify current sign-in, retry jobs or alter account state. Worker liveness is service-wide; operation counts are owner-scoped.",

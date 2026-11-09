@@ -55,6 +55,33 @@ describe('Journal-adapter address selection without ordering', () => {
     expect(await provider.mutate('checkout_address_select', await input(), ctx)).toMatchObject({ status: 'ok', data: { orderSubmitted: false } });
     expect(continueRequests).toBe(1);
   });
+  it('restores an exact observed same-checkout review from a blank tab for read-only reconciliation', async () => {
+    expect(page.url()).toBe('about:blank');
+    const observedReviewUrl = reviewUrl.replace('/review?', '/spc?') + '&hasWorkingJavascript=1';
+    await page.route('**/spc?*', (route) => route.fulfill({ contentType: 'text/html', body: applied }));
+    const result = await provider.read('checkout_addresses_get', { url: addressUrl, reconcileCurrent: true, reconcileUrl: observedReviewUrl }, ctx);
+    expect(result).toMatchObject({ status: 'ok', data: { reconciliationOnly: true, appliedAddress: { checkoutUrl: expect.stringContaining('/spc?') } } });
+    expect(continueRequests).toBe(0);
+  });
+  it('returns owner-private filtered shipping evidence when recorded review is recognized but parsing is incomplete', async () => {
+    const observedReviewUrl = reviewUrl.replace('/review?', '/spc?');
+    await page.route('**/spc?*', (route) => route.fulfill({ contentType: 'text/html', body: '<main id="checkout-delivery-address-panel"><section id="checkout-deliveryAddressPanel"><div id="deliver-to-address-text">Fixture Owner<br>123 Example St<br>Seattle, WA 98101<a>Edit private control</a><span style="display:none">HIDDEN_PRIVATE</span></div></section></main>' }));
+    const result = await provider.read('checkout_addresses_get', { url: addressUrl, reconcileCurrent: true, reconcileUrl: observedReviewUrl }, ctx);
+    expect(result).toMatchObject({ status: 'partial', observation: { authentication: 'verified' }, data: { reconciliationOnly: true, checkoutUrl: expect.stringContaining('/spc?'), observedShippingLines: expect.arrayContaining(['Fixture Owner', '123 Example St', 'Seattle, WA 98101']) }, coverage: { complete: false, missing: ['parsed_shipping_identity'] } });
+    expect(JSON.stringify(result)).not.toMatch(/HIDDEN_PRIVATE|Edit private control/);
+    expect(continueRequests).toBe(0);
+  });
+  it.each([
+    reviewUrl.replace('www.amazon.com', 'untrusted.example'),
+    reviewUrl.replace(/\/p-\d{3}-\d{7}-\d{7}\//, '/p-999-1111111-2222222/'),
+    reviewUrl.replace('isBuyNow=1', 'isBuyNow=0'),
+    reviewUrl + '&action=select-shipping',
+    reviewUrl + '&isBuyNow=1',
+  ])('rejects unsafe or mismatching recorded reconciliation URL without navigation: %s', async (reconcileUrl) => {
+    const result = await provider.read('checkout_addresses_get', { url: addressUrl, reconcileCurrent: true, reconcileUrl }, ctx);
+    expect(result).toMatchObject({ status: 'conflict', error: { code: 'address_reconciliation_context_mismatch' } });
+    expect(page.url()).toBe('about:blank'); expect(continueRequests).toBe(0);
+  });
   it.each(['expectedRevision','expectedContextFingerprint','addressRef','expectedFingerprint','expectedSessionGeneration'])('blocks stale or changed %s before any effect', async (field) => {
     const args = await input();
     (args as Record<string, unknown>)[field] = field === 'expectedSessionGeneration' ? 6 : '0'.repeat(64);

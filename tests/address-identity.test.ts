@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { chromium, type Browser } from 'playwright';
-import { parseAddressLines, readAppliedShippingAddress, samePhysicalAddress, shippingIdentity, type ShippingIdentity } from '../packages/providers/amazon-web/checkout/address-identity.js';
+import { parseAddressLines, readAppliedShippingAddress, readAppliedShippingEvidence, samePhysicalAddress, shippingIdentity, type ShippingIdentity } from '../packages/providers/amazon-web/checkout/address-identity.js';
 
 const home = ['Jamie Example', '123 Example Street', 'Apartment 4B', 'Seattle, Washington 98101-1234', 'United States'];
 
@@ -108,5 +108,72 @@ describe('Independent rendered shipping proof', () => {
   it('supports the known modern applied delivery container with the chooser hidden', async () => {
     const modern = '<section id="shipping-address-selection-panel" style="display:none">Old choices</section><section id="checkout-delivery-address-panel"><div class="destination-data-alignment">' + home.map((line) => '<span>' + line + '</span>').join('') + '</div></section>';
     expect((await read(modern))?.physicalIdentity).toEqual(parseAddressLines(home));
+  });
+  it('reads the exact observed final-review shipping block as complete physical proof', async () => {
+    const html = '<section id="checkout-delivery-address-panel"><section id="checkout-deliveryAddressPanel"><div id="deliver-to-address-text">' + home.join('<br>') + '</div></section></section>';
+    expect((await read(html))?.physicalIdentity).toEqual(parseAddressLines(home));
+  });
+  const addressOnly = '123 Example Street APT 4B, Seattle, WA, 98101-1234, United States';
+  const panelWithHeading = (heading: string) => '<section id="checkout-delivery-address-panel"><section id="checkout-deliveryAddressPanel">' + heading + '<div id="deliver-to-address-text">' + addressOnly + '</div></section></section>';
+  it('reads the recipient only from a unique rendered Delivering to heading in the same panel', async () => {
+    const result = await read(panelWithHeading('<h2>Delivering to Jamie Example</h2>'));
+    expect(samePhysicalAddress(result?.physicalIdentity, parseAddressLines(home))).toBe(true);
+    const changed = await read(panelWithHeading('<h3>Delivering to Taylor Example</h3>'));
+    expect(changed?.physicalIdentity.recipient).toBe('TAYLOR EXAMPLE');
+    expect(samePhysicalAddress(changed?.physicalIdentity, parseAddressLines(home))).toBe(false);
+  });
+  it('accepts a heading beside the inner address panel within the same known outer panel', async () => {
+    const html = '<section id="checkout-delivery-address-panel"><h2>Delivering to Jamie Example</h2><section id="checkout-deliveryAddressPanel"><div id="deliver-to-address-text">' + addressOnly + '</div></section></section>';
+    expect(samePhysicalAddress((await read(html))?.physicalIdentity, parseAddressLines(home))).toBe(true);
+  });
+  it.each([
+    '<h2>Delivering to Jamie Example</h2><h3>Delivering to Taylor Example</h3>',
+    '<h2 style="display:none">Delivering to Jamie Example</h2>',
+    '<button><span role="heading">Delivering to Jamie Example</span></button>',
+    '<h2>Shipping destination</h2>',
+  ])('keeps absent or ambiguous observed recipients partial: %s', async (heading) => {
+    expect(await read(panelWithHeading(heading))).toBeUndefined();
+  });
+  it('returns bounded neighboring heading evidence without inventing a recipient', async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(panelWithHeading('<h2>Shipping destination<button>PRIVATE_CONTROL</button><span style="display:none">PRIVATE_HIDDEN</span></h2>'));
+      expect(await readAppliedShippingEvidence(page)).toEqual({ lines: [addressOnly], neighborHeadingLines: ['Shipping destination'], neighborPanelLines: ['Shipping destination'] });
+    } finally { await page.close(); }
+  });
+  it('rejects a heading that contradicts an explicitly rendered recipient in the address block', async () => {
+    const html = panelWithHeading('<h2>Delivering to Taylor Example</h2>').replace(addressOnly, home.join('<br>'));
+    expect(await read(html)).toBeUndefined();
+  });
+  it('recognizes a plain span announcement only within the same applied panel', async () => {
+    expect(samePhysicalAddress((await read(panelWithHeading('<span>Delivering to Jamie Example</span>')))?.physicalIdentity, parseAddressLines(home))).toBe(true);
+    expect(await read('<span>Delivering to Jamie Example</span>' + panelWithHeading(''))).toBeUndefined();
+  });
+  it.each([
+    '<span style="display:none">Delivering to Jamie Example</span>',
+    '<div>Delivering to Jamie Example</div><div>Delivering to Taylor Example</div>',
+    '<button>Delivering to Jamie Example</button>',
+    '<div>Delivering to Jamie Example ' + addressOnly + '</div>',
+  ])('does not prove hidden, contradictory, control or combined-address recipient announcements %#', async (announcement) => {
+    expect(await read(panelWithHeading(announcement))).toBeUndefined();
+  });
+  it('returns filtered partial evidence without relaxing the write postcondition', async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent('<section id="checkout-delivery-address-panel"><section id="checkout-deliveryAddressPanel"><div id="deliver-to-address-text">Jamie Example<br>123 Example Street Apt 4B<br>Seattle, WA 98101-1234<input type="hidden" value="SECRET_VALUE"><span style="display:none">PRIVATE_HIDDEN</span><button>Edit address</button></div></section></section>');
+      const evidence = await readAppliedShippingEvidence(page);
+      expect(evidence).toEqual({ lines: ['Jamie Example', '123 Example Street Apt 4B', 'Seattle, WA 98101-1234'] });
+      expect(JSON.stringify(evidence)).not.toMatch(/SECRET|PRIVATE_HIDDEN|Edit address/);
+      expect(await readAppliedShippingAddress(page)).toBeUndefined();
+    } finally { await page.close(); }
+  });
+  it.each([
+    '<div id="deliver-to-address-text">' + home.join('<br>') + '</div>',
+    '<section id="shipping-address-selection-panel">Choices</section><section id="checkout-delivery-address-panel"><section id="checkout-deliveryAddressPanel"><div id="deliver-to-address-text">' + home.join('<br>') + '</div></section></section>',
+    '<section id="checkout-delivery-address-panel"><section id="checkout-deliveryAddressPanel"><div id="deliver-to-address-text" style="display:none">' + home.join('<br>') + '</div></section></section>',
+  ])('does not expose applied evidence from unscoped, hidden or still-editable state %#', async (html) => {
+    const page = await browser.newPage();
+    try { await page.setContent(html); expect(await readAppliedShippingEvidence(page)).toBeUndefined(); }
+    finally { await page.close(); }
   });
 });

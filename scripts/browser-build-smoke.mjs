@@ -47,6 +47,14 @@ try {
   const reconciledAddress = await provider.read('checkout_addresses_get', { url: addressUrl, reconcileCurrent: true }, addressContext);
   assert.equal(reconciledAddress.status, 'ok');
   addressSelectionSmoke = false;
+  html = '<span id="nav-link-accountList-nav-line-1">Hello, Fixture</span>' + await readFile(new URL('../tests/fixtures/checkout-review-modern-diagnostics.html', import.meta.url), 'utf8');
+  const modernReviewDiagnostic = await provider.read('checkout_get', { url: 'https://www.amazon.com/checkout/p/p-123-1111111-2222222/spc?isBuyNow=1&pipelineType=Chewbacca&hasWorkingJavascript=1' }, addressContext);
+  assert.equal(modernReviewDiagnostic.status, 'partial', 'Modern review read never emits executable terms');
+  assert.equal(modernReviewDiagnostic.data.diagnosticOnly, true);
+  assert.equal(modernReviewDiagnostic.data.executableTerms, false);
+  assert.equal(modernReviewDiagnostic.data.sections.items[0].links[0].asin, 'B0FIXTURE1');
+  assert.equal(modernReviewDiagnostic.data.sections.payment.lastFour, '4242');
+  assert.doesNotMatch(JSON.stringify(modernReviewDiagnostic), /SECRET_|FULL_CARD_PRIVATE|OUTSIDE_PRIVATE_TEXT|4111/);
   for (const [kind, fixture, collection] of [
     ["cart_get", "cart.html", "lines"],
     ["orders_list", "orders.html", "orders"],

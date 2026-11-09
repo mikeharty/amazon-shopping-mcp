@@ -118,6 +118,29 @@ change the checkout flow.
 The mutually exclusive `reconcileCurrent: true` mode reads the applied destination
 on the current same-checkout address, payment or review stage with fresh account
 authentication. It never repeats an address selection or clears quarantine.
+Supply the exact previously observed `reconcileUrl` with that mode to restore the
+same checkout stage after a restart. Partial results can include private rendered
+address evidence for unsupported layouts; they do not establish complete proof.
+
+An uncertain address selection can be reconciled by an explicit local operator
+command after a complete authenticated read confirms the intended destination:
+
+```sh
+node --env-file=.env --import tsx scripts/reconcile-address-selection.ts \
+  --operation UNKNOWN_ADDRESS_SELECTION_UUID \
+  --snapshot-operation PRE_DISPATCH_ADDRESS_READ_UUID \
+  --reconciliation-operation COMPLETE_APPLIED_ADDRESS_READ_UUID
+```
+
+This defaults to verification only. Add `--apply` to append an encrypted linked
+receipt and release only that operation's account quarantine in one transaction.
+The command validates the original snapshot, checkout, session, identity and
+later proof, and rejects other unresolved effects or financial activity. It
+preserves the original uncertain result and idempotency key. This procedure
+supports address selection only; it never retries a selection, resolves a purchase
+outcome, approves terms or submits an order. Receipt replay cannot release a newer
+quarantine. Physical-only proof confirms the current destination without proving
+retained phone details or the original click's full history.
 
 After address selection, prepare and approve fresh complete purchase terms.
 Shipping eligibility, tax, delivery and total may change with the destination.

@@ -67,6 +67,7 @@ export class Store {
         "utf8",
       ),
     );
+    await this.pool.query(await readFile(new URL('./migrations/002_address_reconciliations.sql', import.meta.url), 'utf8'));
     // Repair the pre-release generation-keyed history without inventing old context.
     let after: string | null = null;
     while (true) {
@@ -553,7 +554,7 @@ export class Store {
         owner,
       ]);
       const busy = await c.query(
-        "SELECT id FROM operations WHERE owner_id=$1 AND status IN ('working','dispatching','outcome_unknown') LIMIT 1",
+        "SELECT id FROM operations WHERE owner_id=$1 AND (status IN ('working','dispatching') OR (status='outcome_unknown' AND NOT EXISTS(SELECT 1 FROM address_selection_reconciliations r WHERE r.operation_id=operations.id AND r.owner_id=operations.owner_id AND r.account_id=operations.account_id))) LIMIT 1",
         [owner],
       );
       if (busy.rows.length)
@@ -562,6 +563,7 @@ export class Store {
           "Active or uncertain operations must be resolved before deleting the audit trail",
         );
       for (const table of [
+        "address_selection_reconciliations",
         "events",
         "watches",
         "observations",

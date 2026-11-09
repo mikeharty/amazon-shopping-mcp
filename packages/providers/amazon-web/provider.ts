@@ -14,6 +14,7 @@ import { extractCart } from "./cart/index.js";
 import { extractCheckout, prepareCheckout } from "./checkout/index.js";
 import { buyingOptions, preparePurchase, readCheckoutAddresses, readPurchasePreconditions, submitPurchase } from "./checkout/purchasing.js";
 import { reconcileCurrentAddress, selectCheckoutAddress } from "./checkout/addresses.js";
+import { isModernReviewCandidate, readModernReviewDiagnostics } from "./checkout/review-diagnostics.js";
 import { purchaseCommitKinds } from "../../core/purchasing.js";
 import {
   extractCategory,
@@ -117,6 +118,7 @@ export class AmazonWebProvider implements ShoppingProvider {
       return staleSession(this.runner.sessionGeneration);
     try {
       return await this.runner.run(async (page) => {
+        if (kind === 'checkout_get' && isModernReviewCandidate(input.url)) return readModernReviewDiagnostics(page, input.url, context);
         const target = readTarget(kind, input);
         if (target) {
           await page.goto(target, {

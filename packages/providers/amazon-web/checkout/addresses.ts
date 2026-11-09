@@ -2,7 +2,7 @@ import type { Page } from 'playwright';
 import type { ProviderContext, Result } from '../../../contracts/index.js';
 import { classifyPage, isVerifiedAuthenticatedAmazonPage } from '../../../browser-runtime/index.js';
 import { digest } from '../../../store/crypto.js';
-import { readAppliedShippingAddress, samePhysicalAddress, type ShippingIdentity } from './address-identity.js';
+import { readAppliedShippingAddress, readAppliedShippingEvidence, samePhysicalAddress, type ShippingIdentity } from './address-identity.js';
 import { addressRoutingIdentity, canonicalAddressUrl, hasVisibleAddressAuthForm, isAddressStepUrl, readCheckoutAddresses } from './purchasing.js';
 
 const stop = (code: string, status: 'unsupported' | 'conflict' = 'unsupported'): Result => ({ status, error: { code, retryable: false } });
@@ -28,15 +28,22 @@ async function appliedAddress(page: Page, addressUrl: string) {
 }
 
 export async function reconcileCurrentAddress(page: Page, input: Record<string, unknown>, context: ProviderContext): Promise<Result> {
-  if (typeof input.url !== 'string' || !isAddressStepUrl(input.url) || !sameCheckoutStage(page.url(), input.url)) return stop('address_reconciliation_context_mismatch', 'conflict');
-  const currentUrl = page.url();
+  const currentUrl = input.reconcileUrl === undefined ? page.url() : input.reconcileUrl;
+  if (typeof input.url !== 'string' || !isAddressStepUrl(input.url) || typeof currentUrl !== 'string' || !sameCheckoutStage(currentUrl, input.url)) return stop('address_reconciliation_context_mismatch', 'conflict');
   // Reconciliation is a fresh read. It never repeats selection or clears quarantine.
   await page.goto('https://www.amazon.com/gp/your-account/order-history', { waitUntil: 'domcontentloaded', timeout: 30_000 });
   if ((await classifyPage(page)).kind !== 'ready' || !await isVerifiedAuthenticatedAmazonPage(page) || await hasVisibleAddressAuthForm(page)) return { status: 'requires_user_action', error: { code: 'challenge_signin', retryable: false } };
   await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  const applied = await appliedAddress(page, input.url);
-  if (!applied) return stop('applied_shipping_address_unobserved');
-  return { status: 'ok', data: { appliedAddress: applied, sessionGeneration: context.sessionGeneration, reconciliationOnly: true }, observation: { source: 'amazon-web', observedAt: new Date().toISOString(), contextRef: context.accountRef, authentication: 'verified' } };
+  if (!sameCheckoutStage(page.url(), input.url)) return stop('address_reconciliation_context_mismatch', 'conflict');
+  const state = await classifyPage(page);
+  if (state.kind !== 'ready' || await hasVisibleAddressAuthForm(page)) return { status: 'requires_user_action', error: { code: state.kind === 'challenge' ? `challenge_${state.challenge}` : 'challenge_signin', retryable: false } };
+  const evidence = await readAppliedShippingEvidence(page);
+  if (!evidence) return stop('applied_shipping_address_unobserved');
+  const checkoutUrl = canonicalAddressUrl(page.url());
+  const observation = { source: 'amazon-web', observedAt: new Date().toISOString(), contextRef: context.accountRef, authentication: 'verified' as const };
+  if (!evidence.physicalIdentity) return { status: 'partial', data: { checkoutUrl, observedShippingLines: evidence.lines, ...(evidence.neighborHeadingLines ? { neighborHeadingLines: evidence.neighborHeadingLines } : {}), ...(evidence.neighborPanelLines ? { neighborPanelLines: evidence.neighborPanelLines } : {}), sessionGeneration: context.sessionGeneration, reconciliationOnly: true }, coverage: { complete: false, missing: ['parsed_shipping_identity'] }, observation };
+  const applied = { physicalIdentity: evidence.physicalIdentity, savedAddressIdFingerprint: evidence.savedAddressIdFingerprint, checkoutUrl };
+  return { status: 'ok', data: { checkoutUrl, appliedAddress: applied, sessionGeneration: context.sessionGeneration, reconciliationOnly: true }, observation };
 }
 
 export async function selectCheckoutAddress(page: Page, input: Record<string, unknown>, context: ProviderContext): Promise<Result> {

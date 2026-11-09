@@ -56,31 +56,59 @@ export function samePhysicalAddress(a: ShippingIdentity | undefined, b: Shipping
   return Boolean(left && right && left.recipient === right.recipient && left.city === right.city && left.region === right.region && left.postalCode === right.postalCode && left.country === right.country && left.addressLines.join(' ') === right.addressLines.join(' '));
 }
 
-/** Read only an independently rendered applied shipping block. Caller owns auth/URL checks. */
-export async function readAppliedShippingAddress(page: Page): Promise<{ physicalIdentity: ShippingIdentity; savedAddressIdFingerprint?: string } | undefined> {
+export type AppliedShippingEvidence = { lines: string[]; neighborHeadingLines?: string[]; neighborPanelLines?: string[]; physicalIdentity?: ShippingIdentity; savedAddressIdFingerprint?: string };
+
+/** Owner-private read evidence only. Caller owns authentication and checkout-context checks. */
+export async function readAppliedShippingEvidence(page: Page): Promise<AppliedShippingEvidence | undefined> {
   const raw = await page.evaluate(() => {
     const visible = (el: Element) => (el as HTMLElement).getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
     if (Array.from(document.querySelectorAll('#shipping-address-selection-panel')).some(visible)) return undefined;
-    const candidates = Array.from(document.querySelectorAll<HTMLElement>('#checkout-delivery-address-panel .destination-data-alignment, #checkout-delivery-address-panel .displayAddressDiv, #shipping-address-summary .displayAddressDiv, #shipping-address-summary .displayAddressUL, #shipping-address-summary'))
+    const candidates = Array.from(document.querySelectorAll<HTMLElement>('#checkout-delivery-address-panel #checkout-deliveryAddressPanel #deliver-to-address-text, #checkout-delivery-address-panel .destination-data-alignment, #checkout-delivery-address-panel .displayAddressDiv, #shipping-address-summary .displayAddressDiv, #shipping-address-summary .displayAddressUL, #shipping-address-summary'))
       .filter(visible).filter((el, _, all) => !all.some((other) => other !== el && el.contains(other)));
     if (candidates.length !== 1) return undefined;
     const root = candidates[0]!;
     if (root.closest('[data-select-destination-on-sasp-desktop-panel], [id^="address-book-entry-"]') || Array.from(root.querySelectorAll('input[type="radio"], [role="radio"], select')).some(visible)) return undefined;
     // Controls and hidden descendants never become address evidence.
-    const renderedText = (node: Node): string => {
+    const renderedText = (node: Node, omitted?: Node): string => {
+      if (node === omitted) return '\n';
       if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? '';
       if (!(node instanceof HTMLElement) || !visible(node) || node.matches('a, button, input, select, textarea, script, style, [role="button"]')) return '';
       if (node.tagName === 'BR') return '\n';
-      const content = Array.from(node.childNodes).map(renderedText).join('');
+      const content = Array.from(node.childNodes).map((child) => renderedText(child, omitted)).join('');
       const block = /^(?:block|flow-root|flex|grid|list-item|table|table-row|table-cell)$/.test(getComputedStyle(node).display);
       return block ? `\n${content}\n` : content;
     };
     const parts = Array.from(root.children).filter((el) => ['SPAN', 'LI', 'DIV'].includes(el.tagName) && visible(el)).map((el) => renderedText(el).trim()).filter(Boolean);
-    const lines = parts.length ? parts : renderedText(root).split(/\n+/);
+    const lines = (parts.length ? parts : [renderedText(root)]).flatMap((part) => part.split(/\n+/)).map((line) => line.replace(/\s+/g, ' ').trim()).filter(Boolean);
+    if (!lines.length || lines.length > 30 || lines.some((line) => line.length > 1000)) return undefined;
+    const panel = root.closest('#checkout-delivery-address-panel') ?? root.closest('#checkout-deliveryAddressPanel');
+    const headings = panel ? Array.from(panel.querySelectorAll<HTMLElement>('h2, h3, [role="heading"]')).filter(visible)
+      .filter((el, _, all) => !root.contains(el) && !el.closest('a, button, [role="button"]') && !all.some((other) => other !== el && el.contains(other))) : [];
+    const neighborHeadingLines = headings.map((heading) => renderedText(heading).replace(/\s+/g, ' ').trim()).filter(Boolean);
+    if (neighborHeadingLines.length > 10 || neighborHeadingLines.some((line) => line.length > 1000)) return undefined;
+    // The native recipient announcement can be a plain span/div. Keep it scoped
+    // to this same applied shipping panel, with the address block separated out.
+    const neighborPanelLines = panel ? renderedText(panel, root).split(/\n+/).map((line) => line.replace(/\s+/g, ' ').trim()).filter(Boolean) : [];
+    if (neighborPanelLines.length > 30 || neighborPanelLines.some((line) => line.length > 1000)) return undefined;
     const id = root.closest('[data-selected-address-id], [data-address-id]') ?? root.querySelector('[data-selected-address-id], [data-address-id]');
-    return { lines, savedAddressId: id?.getAttribute('data-selected-address-id') ?? id?.getAttribute('data-address-id') ?? undefined };
+    return { lines, neighborHeadingLines, neighborPanelLines, savedAddressId: id?.getAttribute('data-selected-address-id') ?? id?.getAttribute('data-address-id') ?? undefined };
   });
   if (!raw) return undefined;
-  const physicalIdentity = parseAddressLines(raw.lines);
-  return physicalIdentity ? { physicalIdentity, ...(raw.savedAddressId ? { savedAddressIdFingerprint: digest(raw.savedAddressId) } : {}) } : undefined;
+  const recipients = [...new Set([...raw.neighborHeadingLines, ...raw.neighborPanelLines].flatMap((line) => {
+    const match = line.match(/^Delivering to\s+(.+)$/i);
+    return match ? [match[1]!.trim()] : [];
+  }))];
+  let physicalIdentity = parseAddressLines(raw.lines);
+  if (recipients.length > 1 || recipients.some((recipient) => raw.lines.some((line) => line.length > 20 && normalized(recipient).includes(normalized(line))))) physicalIdentity = undefined;
+  else if (recipients.length === 1) {
+    if (physicalIdentity && physicalIdentity.recipient !== normalized(recipients[0]!)) physicalIdentity = undefined;
+    else physicalIdentity ??= parseAddressLines([recipients[0]!, ...raw.lines]);
+  }
+  return { lines: raw.lines, ...(raw.neighborHeadingLines.length ? { neighborHeadingLines: raw.neighborHeadingLines } : {}), ...(raw.neighborPanelLines.length ? { neighborPanelLines: raw.neighborPanelLines } : {}), ...(physicalIdentity ? { physicalIdentity } : {}), ...(raw.savedAddressId ? { savedAddressIdFingerprint: digest(raw.savedAddressId) } : {}) };
+}
+
+/** Strict write postcondition: rendered evidence alone never establishes a complete identity. */
+export async function readAppliedShippingAddress(page: Page): Promise<{ physicalIdentity: ShippingIdentity; savedAddressIdFingerprint?: string } | undefined> {
+  const evidence = await readAppliedShippingEvidence(page);
+  return evidence?.physicalIdentity ? { physicalIdentity: evidence.physicalIdentity, ...(evidence.savedAddressIdFingerprint ? { savedAddressIdFingerprint: evidence.savedAddressIdFingerprint } : {}) } : undefined;
 }

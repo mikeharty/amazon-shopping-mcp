@@ -45,6 +45,14 @@ describe("Owner-private checkout address read registration", () => {
     expect(starts[0]?.slice(0, 5)).toEqual(['fixture-owner', 'fixture-account', 'checkout_addresses_get', 'read', { url: input.url }]);
     await tool.handler({ ...input, inspectCurrent: true }, { request, owner });
     expect(starts[1]?.[4]).toEqual({ url: input.url, inspectCurrent: true });
+    const reconcileUrl = input.url.replace('/address', '/spc');
+    await tool.handler({ ...input, reconcileCurrent: true, reconcileUrl }, { request, owner });
+    expect(starts[2]?.[4]).toEqual({ url: input.url, reconcileCurrent: true, reconcileUrl });
+    const schema = tool.inputSchema as unknown as { safeParse: (value: unknown) => { success: boolean } };
+    const schemaInput = { ...input, accountRef: '11111111-1111-4111-8111-111111111111', reconcileUrl };
+    expect(schema.safeParse(schemaInput).success).toBe(false);
+    expect(schema.safeParse({ ...schemaInput, reconcileCurrent: true }).success).toBe(true);
+    expect(schema.safeParse({ ...schemaInput, reconcileCurrent: true, inspectCurrent: true }).success).toBe(false);
     expect(createRegistry(store, { ...options, purchasingEnabled: false }).tools.some((item) => item.name === 'checkout_addresses_get')).toBe(false);
   });
 });
