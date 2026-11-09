@@ -143,6 +143,31 @@ describe('Non-executable modern review diagnostics', () => {
     }] } } });
     expect(JSON.stringify(result)).not.toMatch(/SECRET_|unknownCredential/);
   });
+  it('reads bounded nested JSON, separates row indices and observes a semantic quantity wrapper', async () => {
+    const payload = JSON.stringify({ lineItems: JSON.stringify({ asin: 'B0FIXTURE1', condition: 'New', purchaseMode: 'one_time', lineItemId: 'SECRET_LINE', credential: 'SECRET_NESTED' }) });
+    html = html.replace('id="checkout-item-block-0"', 'id="checkout-item-block-0" data-line-item-id="0" data-lineitemid="SECRET_LINE"')
+      .replace('</article>', `<div data-postdata='${payload}'>Control</div><div aria-label="Change quantity of Fixture cable"><div data-steppervalue="1"><button>Decrease</button><span>1</span><button>Increase</button></div></div></article>`);
+    const result = await provider.read('checkout_get', { url }, ctx);
+    const item = (result.data as {sections:{items:Record<string,unknown>[]}}).sections.items[0]!;
+    expect(item.lineIdentityHashes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'data-line-item-id', namespace: 'row_index' }),
+      expect.objectContaining({ source: 'data-lineitemid', namespace: 'line_identity' }),
+    ]));
+    expect(item.explicitEnumObservations).toEqual(expect.arrayContaining([{ source: 'data-postdata:lineItems.condition', value: 'New' }]));
+    expect(item.quantityObservations).toEqual([{ source: 'visible_quantity_stepper_state_and_label', quantity: 1 }]);
+    expect(JSON.stringify(result)).not.toMatch(/SECRET_|credential/);
+  });
+  it('returns sanitized URL structure and explicit public query ASIN without query values or opaque paths', async () => {
+    html = html.replace('</article>', '<span data-url="/gp/product/B0FIXTURE1/ref=SECRET_TRACK?asin=B0FIXTURE1&amp;token=SECRET_QUERY">Product</span><span data-url="/checkout/ABCDEFGHIJKLMNOPQRSTUVWXYZ123456?token=SECRET_OTHER">Control</span></article>');
+    const result = await provider.read('checkout_get', { url }, ctx);
+    const item = (result.data as {sections:{items:Record<string,unknown>[]}}).sections.items[0]!;
+    expect(item.urlMetadata).toEqual([
+      { source: 'data-url', path: '/gp/product/B0FIXTURE1/ref=[omitted]', queryKeys: ['asin', 'token'] },
+      { source: 'data-url', queryKeys: ['token'] },
+    ]);
+    expect(item.publicIdentity).toEqual(expect.arrayContaining([{ source: 'data-url_query:asin', asin: 'B0FIXTURE1' }]));
+    expect(JSON.stringify(result)).not.toMatch(/SECRET_|ABCDEFGHIJKLMNOPQRSTUVWXYZ/);
+  });
   it('exposes only recognized AUI field paths/types without promoting unbound enums or alternative offers', async () => {
     html = html.replace(/<a href="https:\/\/www.amazon.com\/dp\/[^>]+>Fixture cable<\/a>/, '<span>Fixture cable</span>')
       .replace('</article>', '<div data-postdata=\'{"condition":"New","purchaseMode":"one_time","offers":[{"asin":"B0OTHER001","condition":"Used"}],"secretKey":"SECRET_VALUE"}\'>Control</div><div data-getdata=\'{"price":{"amount":7.40,"currency":"USD"},"cvv":"SECRET_CVV"}\'>Other control</div></article>');
@@ -154,7 +179,7 @@ describe('Non-executable modern review diagnostics', () => {
   });
   it.each([
     '<span data-url="https://evil.example/dp/B0OTHER001">Product</span>',
-    '<span data-url="/checkout/modify?asin=B0OTHER001">Product</span>',
+    '<span data-url="/checkout/modify?unknownProduct=B0OTHER001">Product</span>',
     '<span data-pipeline-link-args="not JSON asin B0OTHER001">Product</span>',
     '<span style="display:none" data-pipeline-link-args=\'{"asin":"B0OTHER001"}\'>Product</span>',
   ])('never invents public identity from unsafe, arbitrary or hidden AUI fields %#', async (fields) => {
@@ -164,6 +189,7 @@ describe('Non-executable modern review diagnostics', () => {
     expect(JSON.stringify(result)).not.toContain('B0OTHER001');
   });
   it.each([
+    '<div aria-label="Change quantity of Fixture cable"><div data-steppervalue="2"><span>1</span></div></div>',
     '<div data-a-component="stepper" data-steppervalue="2" aria-label="Quantity">1</div>',
     '<div data-a-component="stepper" data-steppervalue="2">2</div>',
     '<div data-steppervalue="2" aria-label="Quantity">2</div>',

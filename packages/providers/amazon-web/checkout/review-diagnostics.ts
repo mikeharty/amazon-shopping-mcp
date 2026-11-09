@@ -84,7 +84,8 @@ export async function readModernReviewDiagnostics(page: Page, value: unknown, co
       const publicIdentity: { source: string; asin: string }[] = [];
       const explicitEnumObservations: { source: string; value: string }[] = [];
       const hashValue = async (value: string) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)))).map((byte) => byte.toString(16).padStart(2, '0')).join('');
-      const lineIdentityHashes: { source: string; sha256: string }[] = [];
+      const lineIdentityHashes: { source: string; namespace: 'row_index' | 'line_identity'; sha256: string }[] = [];
+      const urlMetadata: { source: string; path?: string; queryKeys: string[] }[] = [];
       const selectedOfferCandidates: { source: string; value: string }[] = [];
       const jsonLineCandidates: { source: string; value: string }[] = [];
       const auiState: { source: string; fields: { path: string; type: string }[] }[] = [];
@@ -102,18 +103,32 @@ export async function readModernReviewDiagnostics(page: Page, value: unknown, co
         if (productUrl) try {
           const parsed = new URL(productUrl, location.href);
           const asin = parsed.pathname.match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})(?:\/|$)/i)?.[1];
-          if (parsed.origin === 'https://www.amazon.com' && !parsed.username && !parsed.password && asin) publicIdentity.push({ source: 'data-url_product_route', asin: asin.toUpperCase() });
+          if (parsed.origin === 'https://www.amazon.com' && !parsed.username && !parsed.password) {
+            if (asin) publicIdentity.push({ source: 'data-url_product_route', asin: asin.toUpperCase() });
+            for (const key of ['asin', 'ASIN', 'productASIN']) {
+              const values = parsed.searchParams.getAll(key);
+              if (values.length === 1 && /^[A-Z0-9]{10}$/i.test(values[0]!)) publicIdentity.push({ source: `data-url_query:${key}`, asin: values[0]!.toUpperCase() });
+            }
+            const segments = parsed.pathname.split('/').map((segment) => /^ref=/.test(segment) ? 'ref=[omitted]' : segment);
+            const safePath = segments.every((segment) => segment.length <= 80 && !/^[A-Za-z0-9_=-]{24,}$/.test(segment) && !/%[0-9a-f]{2}/i.test(segment)) && parsed.pathname.length <= 512;
+            if (urlMetadata.length < 40) urlMetadata.push({ source: 'data-url', ...(safePath ? { path: segments.join('/') } : {}), queryKeys: [...new Set(parsed.searchParams.keys())].filter((key) => /^[A-Za-z][A-Za-z0-9_.:-]{0,59}$/.test(key)).slice(0, 40) });
+          }
         } catch { /* No identity is inferred from arbitrary URL text. */ }
         for (const name of ['data-line-item-id', 'data-lineitemid']) {
           const value = node.getAttribute(name);
-          if (value && value.length <= 4096 && lineIdentityHashes.length < 40) lineIdentityHashes.push({ source: name, sha256: await hashValue(value) });
+          if (value && value.length <= 4096 && lineIdentityHashes.length < 40) lineIdentityHashes.push({ source: name, namespace: /^\d{1,6}$/.test(value) ? 'row_index' : 'line_identity', sha256: await hashValue(value) });
         }
         for (const name of ['data-pipeline-link-args', 'data-postdata', 'data-getdata', 'data-checkout-select-ship-option-radio', 'data-snappydategroup']) {
           const payload = node.getAttribute(name);
           if (!payload || payload.length > 100_000 || auiState.length >= 40) continue;
           const fields: { path: string; type: string }[] = [];
           const visit = (value: unknown, path: string, depth: number) => {
-            if (!value || typeof value !== 'object' || depth > 6 || fields.length >= 60) return;
+            if (depth > 6 || fields.length >= 60) return;
+            if (typeof value === 'string' && value.length <= 100_000 && /^\s*[\[{]/.test(value)) {
+              try { visit(JSON.parse(value), path, depth + 1); } catch { /* Strings are never evaluated or emitted. */ }
+              return;
+            }
+            if (!value || typeof value !== 'object') return;
             if (Array.isArray(value)) { for (const child of value.slice(0, 10)) visit(child, `${path}[]`, depth + 1); return; }
             for (const [key, child] of Object.entries(value)) {
               const normalizedKey = keyForm(key);
@@ -155,9 +170,17 @@ export async function readModernReviewDiagnostics(page: Page, value: unknown, co
       for (const node of owned) {
         const value = node.getAttribute('data-steppervalue');
         const component = node.getAttribute('data-a-component') ?? node.getAttribute('data-a-type') ?? '';
-        const labels = [node.getAttribute('aria-label') ?? '', rendered(node)].map((text) => text.replace(/\s+/g, ' ').trim());
+        let semanticWrapper: HTMLElement | undefined;
+        for (let candidate: HTMLElement | null = node; candidate && itemOwner(candidate) === el; candidate = candidate.parentElement) {
+          if (/^Change quantity of\s+\S/i.test(candidate.getAttribute('aria-label') ?? '') && visible(candidate)) { semanticWrapper = candidate; break; }
+        }
+        const labels = [node.getAttribute('aria-label') ?? '', rendered(node), ...(semanticWrapper ? [semanticWrapper.getAttribute('aria-label') ?? ''] : [])].map((text) => text.replace(/\s+/g, ' ').trim());
+        if (semanticWrapper) {
+          const numericLeaves = Array.from(node.querySelectorAll<HTMLElement>('*')).filter((child) => visible(child) && !child.matches('input, button, select, [role="button"]') && !child.children.length).map((child) => rendered(child).trim()).filter((text) => /^\d{1,3}$/.test(text));
+          labels.push(...numericLeaves);
+        }
         const numericLabels = labels.flatMap((text) => { const match = text.match(/^(?:(?:quantity|qty)\s*:?\s*)?(\d{1,3})$/i); return match ? [Number(match[1])] : []; });
-        if (value && /^\d{1,3}$/.test(value) && Number(value) > 0 && (/^(?:a-)?stepper$/i.test(component) || node.hasAttribute('data-quantityupdateurl')) && labels.some((text) => /\b(?:quantity|qty)\b/i.test(text)) && numericLabels.length && numericLabels.every((number) => number === Number(value))) quantityObservations.push({ source: 'visible_quantity_stepper_state_and_label', quantity: Number(value) });
+        if (value && /^\d{1,3}$/.test(value) && Number(value) > 0 && (/^(?:a-)?stepper$/i.test(component) || node.hasAttribute('data-quantityupdateurl') || Boolean(semanticWrapper)) && labels.some((text) => /\b(?:quantity|qty)\b/i.test(text)) && numericLabels.length && numericLabels.every((number) => number === Number(value))) quantityObservations.push({ source: 'visible_quantity_stepper_state_and_label', quantity: Number(value) });
       }
       for (const control of Array.from(el.querySelectorAll<HTMLInputElement | HTMLSelectElement>('select, input[type="number"]')).filter(visible)) {
         if (itemOwner(control) !== el || !/^(?:quantity|itemQuantity|quantityDropdown)(?:[._-]\d+)?$/i.test(control.name || control.id)) continue;
@@ -165,8 +188,8 @@ export async function readModernReviewDiagnostics(page: Page, value: unknown, co
         if (selected && /^\d{1,3}$/.test(selected) && Number(selected) > 0) quantityObservations.push({ source: control instanceof HTMLSelectElement ? 'selected_quantity_option' : 'quantity_number_input', quantity: Number(selected) });
       }
       const asins = [...new Set([...publicIdentity.map((entry) => entry.asin), ...links.flatMap((entry) => entry.asin ? [entry.asin] : [])])];
-      for (const candidate of jsonLineCandidates.slice(0, Math.max(0, 40 - lineIdentityHashes.length))) lineIdentityHashes.push({ source: candidate.source, sha256: await hashValue(candidate.value) });
-      const uniqueLineHashes = [...new Set(lineIdentityHashes.map((entry) => entry.sha256))];
+      for (const candidate of jsonLineCandidates.slice(0, Math.max(0, 40 - lineIdentityHashes.length))) lineIdentityHashes.push({ source: candidate.source, namespace: /^\d{1,6}$/.test(candidate.value) ? 'row_index' : 'line_identity', sha256: await hashValue(candidate.value) });
+      const uniqueLineHashes = [...new Set(lineIdentityHashes.filter((entry) => entry.namespace === 'line_identity').map((entry) => entry.sha256))];
       const lineBound = asins.length <= 1 && uniqueLineHashes.length <= 1 && (asins.length === 1 || uniqueLineHashes.length === 1);
       const selectedOfferHashes: { source: string; sha256: string }[] = [];
       if (lineBound) for (const candidate of selectedOfferCandidates.slice(0, 20)) selectedOfferHashes.push({ source: candidate.source, sha256: await hashValue(candidate.value) });
@@ -178,7 +201,7 @@ export async function readModernReviewDiagnostics(page: Page, value: unknown, co
       }
       const attributeNames = [...new Set(owned.flatMap((node) => node.getAttributeNames()))].filter((name) => /^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/.test(name)).slice(0, 80);
       return { id: el.id, observedLines: lines(el), links, structure: structure(el), selections: selections(el), attributeNames,
-        ...(publicIdentity.length ? { publicIdentity: publicIdentity.slice(0, 40) } : {}), ...(lineBound && explicitEnumObservations.length ? { explicitEnumObservations: explicitEnumObservations.slice(0, 40) } : {}), ...(quantityObservations.length ? { quantityObservations: quantityObservations.slice(0, 20) } : {}), ...(offerTokenHashes.length ? { offerTokenHashes } : {}), ...(lineIdentityHashes.length ? { lineIdentityHashes } : {}), ...(selectedOfferHashes.length ? { selectedOfferHashes } : {}), ...(auiState.length ? { auiState } : {}) };
+        ...(publicIdentity.length ? { publicIdentity: publicIdentity.slice(0, 40) } : {}), ...(urlMetadata.length ? { urlMetadata } : {}), ...(lineBound && explicitEnumObservations.length ? { explicitEnumObservations: explicitEnumObservations.slice(0, 40) } : {}), ...(quantityObservations.length ? { quantityObservations: quantityObservations.slice(0, 20) } : {}), ...(offerTokenHashes.length ? { offerTokenHashes } : {}), ...(lineIdentityHashes.length ? { lineIdentityHashes } : {}), ...(selectedOfferHashes.length ? { selectedOfferHashes } : {}), ...(auiState.length ? { auiState } : {}) };
     }));
     const recognizedKeys = new Set(['checkout','checkoutstate','state','data','items','item','lineitems','lineitem','product','products','offer','offers','offering','asin','sku','condition','conditiontype','purchasemode','purchaseoption','sellerid','merchantid','quantity','price','unitprice','subtotal','shipping','shippingcharge','tax','discount','total','ordertotal','giftcard','giftcardcredit','giftcardamount','payment','payments','amount','currency','offeringid','offerlistingid']);
     const financialKeys = new Set(['asin','sku','condition','conditiontype','purchasemode','purchaseoption','sellerid','merchantid','quantity','price','unitprice','subtotal','shipping','shippingcharge','tax','discount','total','ordertotal','giftcard','giftcardcredit','giftcardamount','amount','currency','offeringid','offerlistingid']);
