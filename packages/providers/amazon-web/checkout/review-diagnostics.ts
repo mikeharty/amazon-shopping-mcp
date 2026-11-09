@@ -86,6 +86,11 @@ export async function readModernReviewDiagnostics(page: Page, value: unknown, co
       const hashValue = async (value: string) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)))).map((byte) => byte.toString(16).padStart(2, '0')).join('');
       const lineIdentityHashes: { source: string; namespace: 'row_index' | 'line_identity'; sha256: string }[] = [];
       const urlMetadata: { source: string; path?: string; queryKeys: string[] }[] = [];
+      const urlEncodingShapes: { jsonString: boolean; percentEncoded: boolean; decoded: boolean }[] = [];
+      const auiStructure: { source: string; fields: { path: string; type: string }[] }[] = [];
+      const safeName = (value: string) => /^[A-Za-z][A-Za-z0-9_.:-]{0,59}$/.test(value) && !/(?:secret|credential|token|password|cvv|cardnumber)/i.test(value);
+      const inputFields = Array.from(el.querySelectorAll<HTMLInputElement>('input')).filter(live => itemOwner(live) === el).slice(0, 40).map(input => ({ type: input.type, ...(safeName(input.name) ? { name: input.name } : {}) }));
+      const stepperMetadata: unknown[] = [];
       const selectedOfferCandidates: { source: string; value: string }[] = [];
       const jsonLineCandidates: { source: string; value: string }[] = [];
       const auiState: { source: string; fields: { path: string; type: string }[] }[] = [];
@@ -101,7 +106,16 @@ export async function readModernReviewDiagnostics(page: Page, value: unknown, co
       for (const node of owned) {
         const productUrl = node.getAttribute('data-url');
         if (productUrl) try {
-          const parsed = new URL(productUrl, location.href);
+          let decodedUrl = productUrl;
+          const jsonString = /^\s*"/.test(productUrl), percentEncoded = /%[0-9a-f]{2}/i.test(productUrl);
+          if (productUrl.length > 8192) continue;
+          for (let pass = 0; pass < 2; pass++) {
+            if (/^\s*"/.test(decodedUrl)) { const value: unknown = JSON.parse(decodedUrl); if (typeof value !== 'string') break; decodedUrl = value; }
+            else if (/%[0-9a-f]{2}/i.test(decodedUrl)) decodedUrl = decodeURIComponent(decodedUrl);
+            else break;
+          }
+          if (urlEncodingShapes.length < 40) urlEncodingShapes.push({ jsonString, percentEncoded, decoded: decodedUrl !== productUrl });
+          const parsed = new URL(decodedUrl, location.href);
           const asin = parsed.pathname.match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})(?:\/|$)/i)?.[1];
           if (parsed.origin === 'https://www.amazon.com' && !parsed.username && !parsed.password) {
             if (asin) publicIdentity.push({ source: 'data-url_product_route', asin: asin.toUpperCase() });
@@ -121,6 +135,21 @@ export async function readModernReviewDiagnostics(page: Page, value: unknown, co
         for (const name of ['data-pipeline-link-args', 'data-postdata', 'data-getdata', 'data-checkout-select-ship-option-radio', 'data-snappydategroup']) {
           const payload = node.getAttribute(name);
           if (!payload || payload.length > 100_000 || auiState.length >= 40) continue;
+          const shapeFields: { path: string; type: string }[] = [];
+          const shape = (value: unknown, path: string, depth: number): void => {
+            if (depth > 5 || shapeFields.length >= 60) return;
+            if (typeof value === 'string' && value.length <= 100_000 && /^\s*[\[{]/.test(value)) { try { shape(JSON.parse(value), path, depth + 1); } catch {} return; }
+            if (!value || typeof value !== 'object') return;
+            if (Array.isArray(value)) { for (const child of value.slice(0, 5)) shape(child, `${path}[]`, depth + 1); return; }
+            for (const [key, child] of Object.entries(value)) {
+              if (!safeName(key) || shapeFields.length >= 60) continue;
+              const next = path ? `${path}.${key}` : key;
+              shapeFields.push({ path: next, type: child === null ? 'null' : Array.isArray(child) ? 'array' : typeof child });
+              shape(child, next, depth + 1);
+            }
+          };
+          try { shape(JSON.parse(payload), '', 0); } catch {}
+          if (shapeFields.length && auiStructure.length < 40) auiStructure.push({ source: name, fields: shapeFields });
           const fields: { path: string; type: string }[] = [];
           const visit = (value: unknown, path: string, depth: number) => {
             if (depth > 6 || fields.length >= 60) return;
@@ -170,6 +199,14 @@ export async function readModernReviewDiagnostics(page: Page, value: unknown, co
       for (const node of owned) {
         const value = node.getAttribute('data-steppervalue');
         const component = node.getAttribute('data-a-component') ?? node.getAttribute('data-a-type') ?? '';
+        if (value !== null && stepperMetadata.length < 20) {
+          const ancestors: { attributeNames: string[]; labelCategory: string }[] = [];
+          for (let parent: HTMLElement | null = node; parent && itemOwner(parent) === el && ancestors.length < 4; parent = parent.parentElement) {
+            const label = parent.getAttribute('aria-label') ?? '';
+            ancestors.push({ attributeNames: parent.getAttributeNames().filter(safeName).slice(0, 30), labelCategory: /^Change quantity of\s+/i.test(label) ? 'change_quantity' : /increase/i.test(label) ? 'increase' : /decrease/i.test(label) ? 'decrease' : 'other' });
+          }
+          stepperMetadata.push({ ...(safeName(component) ? { component } : {}), ...(safeName(node.getAttribute('name') ?? '') ? { name: node.getAttribute('name') } : {}), ...(/^\d{1,3}$/.test(value) ? { numericState: Number(value) } : {}), numericLeaves: [node, ...Array.from(node.querySelectorAll<HTMLElement>('*'))].filter(child => visible(child) && !child.children.length).map(child => rendered(child).trim()).filter(text => /^\d{1,3}$/.test(text)).slice(0, 20).map(Number), ancestors });
+        }
         let semanticWrapper: HTMLElement | undefined;
         for (let candidate: HTMLElement | null = node; candidate && itemOwner(candidate) === el; candidate = candidate.parentElement) {
           if (/^Change quantity of\s+\S/i.test(candidate.getAttribute('aria-label') ?? '') && visible(candidate)) { semanticWrapper = candidate; break; }
@@ -201,7 +238,7 @@ export async function readModernReviewDiagnostics(page: Page, value: unknown, co
       }
       const attributeNames = [...new Set(owned.flatMap((node) => node.getAttributeNames()))].filter((name) => /^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/.test(name)).slice(0, 80);
       return { id: el.id, observedLines: lines(el), links, structure: structure(el), selections: selections(el), attributeNames,
-        ...(publicIdentity.length ? { publicIdentity: publicIdentity.slice(0, 40) } : {}), ...(urlMetadata.length ? { urlMetadata } : {}), ...(lineBound && explicitEnumObservations.length ? { explicitEnumObservations: explicitEnumObservations.slice(0, 40) } : {}), ...(quantityObservations.length ? { quantityObservations: quantityObservations.slice(0, 20) } : {}), ...(offerTokenHashes.length ? { offerTokenHashes } : {}), ...(lineIdentityHashes.length ? { lineIdentityHashes } : {}), ...(selectedOfferHashes.length ? { selectedOfferHashes } : {}), ...(auiState.length ? { auiState } : {}) };
+        ...(publicIdentity.length ? { publicIdentity: publicIdentity.slice(0, 40) } : {}), ...(urlMetadata.length ? { urlMetadata } : {}), ...(urlEncodingShapes.length ? { urlEncodingShapes } : {}), ...(auiStructure.length ? { auiStructure } : {}), ...(inputFields.length ? { inputFields } : {}), ...(stepperMetadata.length ? { stepperMetadata } : {}), ...(lineBound && explicitEnumObservations.length ? { explicitEnumObservations: explicitEnumObservations.slice(0, 40) } : {}), ...(quantityObservations.length ? { quantityObservations: quantityObservations.slice(0, 20) } : {}), ...(offerTokenHashes.length ? { offerTokenHashes } : {}), ...(lineIdentityHashes.length ? { lineIdentityHashes } : {}), ...(selectedOfferHashes.length ? { selectedOfferHashes } : {}), ...(auiState.length ? { auiState } : {}) };
     }));
     const recognizedKeys = new Set(['checkout','checkoutstate','state','data','items','item','lineitems','lineitem','product','products','offer','offers','offering','asin','sku','condition','conditiontype','purchasemode','purchaseoption','sellerid','merchantid','quantity','price','unitprice','subtotal','shipping','shippingcharge','tax','discount','total','ordertotal','giftcard','giftcardcredit','giftcardamount','payment','payments','amount','currency','offeringid','offerlistingid']);
     const financialKeys = new Set(['asin','sku','condition','conditiontype','purchasemode','purchaseoption','sellerid','merchantid','quantity','price','unitprice','subtotal','shipping','shippingcharge','tax','discount','total','ordertotal','giftcard','giftcardcredit','giftcardamount','amount','currency','offeringid','offerlistingid']);

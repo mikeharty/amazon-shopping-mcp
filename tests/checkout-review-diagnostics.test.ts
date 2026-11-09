@@ -168,6 +168,17 @@ describe('Non-executable modern review diagnostics', () => {
     expect(item.publicIdentity).toEqual(expect.arrayContaining([{ source: 'data-url_query:asin', asin: 'B0FIXTURE1' }]));
     expect(JSON.stringify(result)).not.toMatch(/SECRET_|ABCDEFGHIJKLMNOPQRSTUVWXYZ/);
   });
+  it('discovers bounded structural shapes and encoded public routes without scalar payloads', async () => {
+    html = html.replace('</article>', '<div data-url="%2Fgp%2Fproduct%2FB0FIXTURE1" data-postdata=\'{"layout":{"selectionDetails":"PRIVATE_VALUE","lineItems":"not JSON"},"credential":"SECRET_VALUE"}\'><input name="selectionField" type="hidden" value="SECRET_INPUT"><div aria-label="Change quantity of Private title"><span data-steppervalue="1" data-a-type="stepper"><span>1</span></span></div></div></article>');
+    const result = await provider.read('checkout_get', { url }, ctx);
+    const item = (result.data as {sections:{items:Record<string,unknown>[]}}).sections.items[0]!;
+    expect(item.urlEncodingShapes).toContainEqual({ jsonString: false, percentEncoded: true, decoded: true });
+    expect(item.publicIdentity).toContainEqual({ source: 'data-url_product_route', asin: 'B0FIXTURE1' });
+    expect(item.auiStructure).toEqual([{ source: 'data-postdata', fields: [{ path: 'layout', type: 'object' }, { path: 'layout.selectionDetails', type: 'string' }, { path: 'layout.lineItems', type: 'string' }] }]);
+    expect(item.inputFields).toContainEqual({ name: 'selectionField', type: 'hidden' });
+    expect(item.stepperMetadata).toEqual([expect.objectContaining({ numericState: 1, numericLeaves: [1], ancestors: expect.arrayContaining([expect.objectContaining({ labelCategory: 'change_quantity' })]) })]);
+    expect(JSON.stringify(result)).not.toMatch(/PRIVATE_VALUE|SECRET_|Private title/);
+  });
   it('exposes only recognized AUI field paths/types without promoting unbound enums or alternative offers', async () => {
     html = html.replace(/<a href="https:\/\/www.amazon.com\/dp\/[^>]+>Fixture cable<\/a>/, '<span>Fixture cable</span>')
       .replace('</article>', '<div data-postdata=\'{"condition":"New","purchaseMode":"one_time","offers":[{"asin":"B0OTHER001","condition":"Used"}],"secretKey":"SECRET_VALUE"}\'>Control</div><div data-getdata=\'{"price":{"amount":7.40,"currency":"USD"},"cvv":"SECRET_CVV"}\'>Other control</div></article>');
