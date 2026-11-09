@@ -41,7 +41,7 @@ export async function reconcileCurrentAddress(page: Page, input: Record<string, 
   if (!evidence) return stop('applied_shipping_address_unobserved');
   const checkoutUrl = canonicalAddressUrl(page.url());
   const observation = { source: 'amazon-web', observedAt: new Date().toISOString(), contextRef: context.accountRef, authentication: 'verified' as const };
-  if (!evidence.physicalIdentity) return { status: 'partial', data: { checkoutUrl, observedShippingLines: evidence.lines, ...(evidence.neighborHeadingLines ? { neighborHeadingLines: evidence.neighborHeadingLines } : {}), ...(evidence.neighborPanelLines ? { neighborPanelLines: evidence.neighborPanelLines } : {}), sessionGeneration: context.sessionGeneration, reconciliationOnly: true }, coverage: { complete: false, missing: ['parsed_shipping_identity'] }, observation };
+  if (!evidence.physicalIdentity) return { status: 'partial', data: { checkoutUrl, observedShippingLines: evidence.lines, ...(evidence.neighborHeadingLines ? { neighborHeadingLines: evidence.neighborHeadingLines } : {}), ...(evidence.neighborPanelLines ? { neighborPanelLines: evidence.neighborPanelLines } : {}), ...(evidence.knownHeaderLabels ? { knownHeaderLabels: evidence.knownHeaderLabels } : {}), sessionGeneration: context.sessionGeneration, reconciliationOnly: true }, coverage: { complete: false, missing: ['parsed_shipping_identity'] }, observation };
   const applied = { physicalIdentity: evidence.physicalIdentity, savedAddressIdFingerprint: evidence.savedAddressIdFingerprint, checkoutUrl };
   return { status: 'ok', data: { checkoutUrl, appliedAddress: applied, sessionGeneration: context.sessionGeneration, reconciliationOnly: true }, observation };
 }

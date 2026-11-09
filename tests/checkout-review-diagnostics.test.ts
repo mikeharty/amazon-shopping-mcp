@@ -14,7 +14,7 @@ describe('Non-executable modern review diagnostics', () => {
   afterAll(async () => { await browser?.close(); });
   beforeEach(async () => {
     html = fixture; accountHtml = greeting; visits = []; submissions = 0;
-    context = await browser.newContext(); page = await context.newPage();
+    context = await browser.newContext({ offline: true }); page = await context.newPage();
     await page.route('**/*', (route) => {
       const path = new URL(route.request().url()).pathname; visits.push(path);
       if (path.includes('place-order')) submissions++;
@@ -50,8 +50,20 @@ describe('Non-executable modern review diagnostics', () => {
     expect(result.data).toBeUndefined(); expect(submissions).toBe(0);
   });
   it('rejects redirect to another purchase context', async () => {
-    await page.route('**/spc?*', (route) => route.fulfill({ status: 302, headers: { location: 'https://www.amazon.com/checkout/p/p-999-1111111-2222222/spc' } }));
+    const target = 'https://www.amazon.com/checkout/p/p-999-1111111-2222222/spc';
+    await page.route('**/spc?*', (route) => route.fulfill({ contentType: 'text/html', body: html.replace('<body>', `<body><script>history.replaceState(null,'',${JSON.stringify(target)})</script>`) }));
     expect(await provider.read('checkout_get', { url }, ctx)).toMatchObject({ status: 'unsupported', error: { code: 'modern_review_context_changed' } });
+  });
+  it.each(['cosmetic_tracking', 'purchase_mode', 'pipeline', 'checkout_session'])('checks transaction identity across %s redirects', async (kind) => {
+    const target = kind === 'cosmetic_tracking' ? url.replace('hasWorkingJavascript=1', 'referrer=address')
+      : kind === 'purchase_mode' ? url.replace('isBuyNow=1', 'isBuyNow=0')
+      : kind === 'pipeline' ? url.replace('pipelineType=Chewbacca', 'pipelineType=Other') : url + '&checkoutSessionId=fixture-other-session';
+    await page.route('**/spc?*', (route) => route.fulfill({ contentType: 'text/html', body: html.replace('<body>', `<body><script>history.replaceState(null,'',${JSON.stringify(target)})</script>`) }));
+    const result = await provider.read('checkout_get', { url }, ctx);
+    expect(result, JSON.stringify({result,pageUrl:page.url(),target,requested:url})).toMatchObject(kind === 'cosmetic_tracking'
+      ? { status: 'partial', data: { diagnosticOnly: true, executableTerms: false } }
+      : { status: 'unsupported', error: { code: 'modern_review_context_changed' } });
+    expect(submissions).toBe(0);
   });
   it.each(['hidden', 'duplicate', 'missing'])('rejects an %s recognized review root', async (kind) => {
     html = kind === 'hidden' ? '<div style="display:none">' + fixture + '</div>' : kind === 'duplicate' ? fixture + fixture : fixture.replace('id="checkout-item-block-panel"', 'id="unknown-panel"');

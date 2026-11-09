@@ -17,7 +17,7 @@ function validUrl(value: string): boolean {
 }
 function routingIdentity(value: string) {
   const url = new URL(value);
-  return JSON.stringify({ origin: url.origin, path: url.pathname, routing: ['pipelineType', 'isBuyNow', 'hasWorkingJavascript', 'purchaseId', 'checkoutSessionId'].map((key) => [key, url.searchParams.getAll(key)]) });
+  return JSON.stringify({ origin: url.origin, path: url.pathname, routing: ['pipelineType', 'isBuyNow', 'purchaseId', 'checkoutSessionId'].map((key) => [key, url.searchParams.getAll(key)]) });
 }
 async function hasAuthForm(page: Page): Promise<boolean> {
   return page.evaluate(() => Array.from(document.querySelectorAll('form[name="signIn"], form#ap_signin_form, input[name="email"], input[type="password"], input[name="otpCode"], input[name="code"], input[name="verificationCode"], input[autocomplete="cc-csc"], input[name="cvv"]')).some((el) => (el as HTMLElement).getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden'));
