@@ -14,7 +14,9 @@ inactive checks, including the observed CSS rule that suppresses a sole empty
 classification wrapper; its expanded provenance suite passed 48 tests. The profile requires
 fresh native product-form preparation, immutable in-memory checkout provenance,
 exact-term owner approval, one dispatch, and a new independently verified receipt.
-Unsupported layouts and uncertain effects remain explicit. These results are
+Unsupported layouts and uncertain effects remain explicit. A later address-continuation
+correction waits for complete independent destination evidence after one Continue;
+92 combined address/provenance tests and final build/compiled checks passed. These results are
 synthetic local evidence; live account and CI outcomes are recorded separately.
 
 ## Version 0.3.0 local verification

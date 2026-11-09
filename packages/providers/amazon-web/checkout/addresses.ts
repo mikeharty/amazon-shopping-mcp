@@ -22,7 +22,7 @@ function sameCheckoutStage(url: string, addressUrl: string): boolean {
 
 /** Observed applied shipping content, independent of the editable address radios. */
 async function appliedAddress(page: Page, addressUrl: string) {
-  if (!sameCheckoutStage(page.url(), addressUrl) || (await classifyPage(page)).kind !== 'ready' || await hasVisibleAddressAuthForm(page)) return undefined;
+  if (!sameCheckoutStage(page.url(), addressUrl) || new URL(page.url()).pathname.endsWith('/address') || (await classifyPage(page)).kind !== 'ready' || await hasVisibleAddressAuthForm(page)) return undefined;
   const applied = await readAppliedShippingAddress(page);
   return applied ? { ...applied, checkoutUrl: canonicalAddressUrl(page.url()) } : undefined;
 }
@@ -46,7 +46,8 @@ export async function reconcileCurrentAddress(page: Page, input: Record<string, 
   return { status: 'ok', data: { checkoutUrl, appliedAddress: applied, sessionGeneration: context.sessionGeneration, reconciliationOnly: true }, observation };
 }
 
-export async function selectCheckoutAddress(page: Page, input: Record<string, unknown>, context: ProviderContext): Promise<Result> {
+export async function selectCheckoutAddress(page: Page, input: Record<string, unknown>, context: ProviderContext, timing = { verificationTimeoutMs: 10_000, pollIntervalMs: 100 }): Promise<Result> {
+  if (!Number.isFinite(timing.verificationTimeoutMs) || timing.verificationTimeoutMs < 1 || timing.verificationTimeoutMs > 10_000 || !Number.isFinite(timing.pollIntervalMs) || timing.pollIntervalMs < 1 || timing.pollIntervalMs > 100) return stop('invalid_address_verification_timing');
   if (typeof input.url !== 'string' || !isAddressStepUrl(input.url)) return stop('invalid_address_step_url');
   if (input.expectedSessionGeneration !== context.sessionGeneration) return stop('stale_address_session', 'conflict');
   const observed = await readCheckoutAddresses(page, { url: input.url }, context);
@@ -114,12 +115,19 @@ export async function selectCheckoutAddress(page: Page, input: Record<string, un
     if (!await safeContinue()) return dispatched ? uncertain() : stop('address_continue_control_unsafe');
     dispatched = true;
     await continueControl.click({ timeout: 5_000 });
-    await page.waitForFunction(() => {
-      const visible = (el: Element) => (el as HTMLElement).getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
-      return !Array.from(document.querySelectorAll('#shipping-address-selection-panel')).some(visible) && Array.from(document.querySelectorAll('#checkout-delivery-address-panel, #shipping-address-summary')).some(visible);
-    }, undefined, { timeout: 10_000 });
-    const applied = await appliedAddress(page, snapshot.checkoutUrl);
-    return applied ? verifiedSelection(applied, target, context) : uncertain();
+    // The native review can hydrate its recipient/address after navigation, and
+    // metadata panels can have no layout box. Wait for complete independent
+    // destination proof, rather than visibility of one outer container.
+    const deadline = Date.now() + timing.verificationTimeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        if (!sameCheckoutStage(page.url(), snapshot.checkoutUrl) || (await classifyPage(page)).kind !== 'ready' || await hasVisibleAddressAuthForm(page)) return uncertain();
+        const applied = await appliedAddress(page, snapshot.checkoutUrl);
+        if (applied) return verifiedSelection(applied, target, context);
+      } catch { /* A navigation can replace the document; only proof reads repeat. */ }
+      await page.waitForTimeout(timing.pollIntervalMs);
+    }
+    return uncertain();
   } catch { return dispatched ? uncertain() : stop('address_selection_preflight_failed'); }
 }
 

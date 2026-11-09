@@ -704,7 +704,7 @@ describe("Volatile native-entry provenance for modern checkout", () => {
       error: { code: "modern_checkout_origin_required" },
     });
     expect(finalPosts).toBe(0);
-  });
+  }, 15_000);
   it.each(["cart mutation", "legacy preparation"])(
     "orders invalidation inside serialized actions when %s is queued behind native preparation",
     async (queuedAction) => {

@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
+import { selectCheckoutAddress } from '../packages/providers/amazon-web/checkout/addresses.js';
 import { AmazonWebProvider } from '../packages/providers/amazon-web/provider.js';
 import type { ProviderContext, Result } from '../packages/contracts/index.js';
 
@@ -45,6 +46,17 @@ describe('Journal-adapter address selection without ordering', () => {
     expect(result).toMatchObject({ status: 'ok', data: { verification: 'saved_address_id_and_physical_destination', orderSubmitted: false, appliedAddress: { physicalIdentity: { recipient: 'FIXTURE OWNER', addressLines: ['123 EXAMPLE ST', 'APT 4'], city: 'SEATTLE', region: 'WA', postalCode: '98101', country: 'US' } } } });
     expect(continueRequests).toBe(1);
     expect((result.data as Record<string, unknown>).intentId).toBeUndefined();
+  });
+  it.each([false, true])('verifies modern nested applied proof with a boxless outer panel (delayed=%s) after one Continue', async (delayed) => {
+    const modern = `<main id="checkout-experience-container"><a id="change-delivery-link" href="${addressUrl}">Delivering to Fixture Owner</a><section id="checkout-delivery-address-panel" style="display:contents"><section id="checkout-deliveryAddressPanel"><div id="deliver-to-address-text">123 Example St<br>Apt 4<br>Seattle, WA 98101<br>United States</div></section></section></main>`;
+    reviewHtml = delayed ? `<main id="hydrating-review"></main><script>setTimeout(()=>{document.body.innerHTML=${JSON.stringify(modern)}},150)</script>` : modern;
+    expect(await provider.mutate('checkout_address_select', await input(), ctx)).toMatchObject({status:'ok',data:{verification:'physical_destination_only',orderSubmitted:false}});
+    expect(continueRequests).toBe(1);
+  });
+  it.each(['challenge','wrong context','timeout','chooser with stale summary','address stage with stale summary'])('keeps %s after Continue uncertain without any second click', async (scenario) => {
+    reviewHtml = scenario === 'challenge' ? '<input type="password">' : scenario === 'wrong context' ? `<script>history.replaceState(null,'','/checkout/p/p-999-1111111-2222222/review?isBuyNow=1&pipelineType=Chewbacca')</script>${applied}` : scenario === 'chooser with stale summary' ? `<main id="shipping-address-selection-panel">Saved address choices remain visible</main>${applied}` : scenario === 'address stage with stale summary' ? `<script>history.replaceState(null,'',${JSON.stringify(addressUrl)})</script>${applied}` : '<main>Review loading without independent address proof</main>';
+    const result = await selectCheckoutAddress(page, await input(), ctx, {verificationTimeoutMs:200,pollIntervalMs:10});
+    expect(result).toMatchObject({status:'outcome_unknown',error:{code:'ADDRESS_SELECTION_OUTCOME_UNKNOWN',retryable:false}});expect(continueRequests).toBe(1);
   });
   it('reports physical-only verification when review omits saved ID and phone', async () => {
     reviewHtml = applied.replace(' data-address-id="fixture-home"', '');
@@ -126,7 +138,7 @@ describe('Journal-adapter address selection without ordering', () => {
     ['missing independent summary', '<main id="checkout-delivery-address-panel">Address selection received</main>'],
   ])('returns outcome_unknown after effect with %s and permits read reconciliation without repeating selection', async (_, html) => {
     reviewHtml = html;
-    const result = await provider.mutate('checkout_address_select', await input(), ctx);
+    const result = await selectCheckoutAddress(page, await input(), ctx, {verificationTimeoutMs:200,pollIntervalMs:10});
     expect(result).toMatchObject({ status: 'outcome_unknown', error: { retryable: false } });
     expect(continueRequests).toBe(1);
     reviewHtml = applied;
