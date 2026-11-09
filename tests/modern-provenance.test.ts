@@ -213,6 +213,76 @@ describe("Volatile native-entry provenance for modern checkout", () => {
     expect(nativePosts).toBe(0);
     expect(finalPosts).toBe(0);
   });
+  it("accepts the exact CSS-hidden empty classification wrapper in an active row", async () => {
+    productHTML =
+      "<style>.accordion-atc-group-row > .accordion-atc-group-item:not(:has(* > *)){display:none}</style>" +
+      productHTML;
+    await page.goto(pdp);
+    expect(
+      await page
+        .locator(".accordion-atc-group-item")
+        .evaluate((el) => getComputedStyle(el).display),
+    ).toBe("none");
+    expect(await page.locator("#buy-now-button").isVisible()).toBe(true);
+    expect(await getModernProductOffer(page)).toBeDefined();
+    expect(await prepare()).toMatchObject({ status: "ok" });
+    expect(nativePosts).toBe(1);
+    expect(finalPosts).toBe(0);
+  });
+  it.each(["used", "sns"])(
+    "rejects a competing empty hidden %s classification in the active row",
+    async (kind) => {
+      productHTML =
+        "<style>.accordion-atc-group-row > .accordion-atc-group-item:not(:has(* > *)){display:none}</style>" +
+        productHTML;
+      productHTML = productHTML.replace(
+        '<input id="buy-now-button"',
+        `<div class="accordion-atc-group-item"><div id="buyNow_regular_offerActions_${kind}_feature_div" data-feature-name="buyNow_regular_offerActions_${kind}"></div></div><input id="buy-now-button"`,
+      );
+      expect((await prepare()).status).not.toBe("ok");
+      expect(nativePosts).toBe(0);
+      expect(finalPosts).toBe(0);
+    },
+  );
+  it.each([
+    "extra_text",
+    "extra_child",
+    "wrong_wrapper",
+    "hidden_marker",
+    "inline_hidden_wrapper",
+  ])("rejects a broader hidden metadata profile: %s", async (kind) => {
+    productHTML =
+      "<style>.accordion-atc-group-item,.arbitrary-wrapper{display:none}</style>" +
+      productHTML;
+    if (kind === "extra_text")
+      productHTML = productHTML.replace(
+        'data-feature-name="buyNow_regular_offerActions_new"></div>',
+        'data-feature-name="buyNow_regular_offerActions_new">Inactive offer</div>',
+      );
+    if (kind === "extra_child")
+      productHTML = productHTML.replace(
+        'data-feature-name="buyNow_regular_offerActions_new"></div>',
+        'data-feature-name="buyNow_regular_offerActions_new"><span></span></div>',
+      );
+    if (kind === "wrong_wrapper")
+      productHTML = productHTML.replace(
+        'class="accordion-atc-group-item"',
+        'class="arbitrary-wrapper"',
+      );
+    if (kind === "hidden_marker")
+      productHTML = productHTML.replace(
+        'data-feature-name="buyNow_regular_offerActions_new"',
+        'data-feature-name="buyNow_regular_offerActions_new" style="display:none"',
+      );
+    if (kind === "inline_hidden_wrapper")
+      productHTML = productHTML.replace(
+        'class="accordion-atc-group-item"',
+        'class="accordion-atc-group-item" style="display:none"',
+      );
+    expect((await prepare()).status).not.toBe("ok");
+    expect(nativePosts).toBe(0);
+    expect(finalPosts).toBe(0);
+  });
   it("reports positive native New/selected-one-time options without clicking or creating origin", async () => {
     const options = await provider.read(
       "buying_options_get",

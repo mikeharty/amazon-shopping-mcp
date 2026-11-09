@@ -74,6 +74,7 @@ try {
   assert.equal(modernReviewDiagnostic.data.sections.totals.giftCardCredits[0].value, '-$26.40');
   assert.doesNotMatch(JSON.stringify(modernReviewDiagnostic), /SECRET_|FULL_CARD_PRIVATE|OUTSIDE_PRIVATE_TEXT|4111/);
   html = await readFile(new URL('../tests/fixtures/modern-product-offer.html', import.meta.url), 'utf8');
+  html += '<style>.accordion-atc-group-row > .accordion-atc-group-item:not(:has(* > *)) { display: none; }</style>';
   await runtime.run(async page => {
     await page.goto('https://www.amazon.com/dp/B0FIXTURE1');
     const selected = await getModernProductOffer(page);

@@ -10,7 +10,8 @@ production build, and compiled Chromium fixture checks. A subsequent serialized
 preparation invalidation correction passed the 34-test provenance suite; the
 final typecheck, rebuild, and compiled checks were repeated. The native New
 marker also permits empty metadata wrappers while retaining explicit hidden and
-inactive checks; its expanded provenance suite passed 40 tests. The profile requires
+inactive checks, including the observed CSS rule that suppresses a sole empty
+classification wrapper; its expanded provenance suite passed 48 tests. The profile requires
 fresh native product-form preparation, immutable in-memory checkout provenance,
 exact-term owner approval, one dispatch, and a new independently verified receipt.
 Unsupported layouts and uncertain effects remain explicit. These results are

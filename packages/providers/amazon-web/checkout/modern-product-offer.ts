@@ -87,6 +87,25 @@ export async function getModernProductOffer(
     if (!row || !form.contains(row) || !visible(row)) return undefined;
     // Metadata wrappers may have no layout box (for example display:contents).
     // The native control and its offer row separately require positive visibility.
+    // Observed Amazon CSS hides direct group-item wrappers with no grandchildren:
+    // .accordion-atc-group-row > .accordion-atc-group-item:not(:has(* > *))
+    // A sole empty classification marker is metadata, not an inactive offer UI.
+    // Apply the same exception to competing classifications so they fail uniqueness.
+    const emptyMetadataWrapper = (marker: Element, wrapper: Element) =>
+      marker.tagName === "DIV" &&
+      marker.children.length === 0 &&
+      !marker.textContent?.trim() &&
+      wrapper.tagName === "DIV" &&
+      wrapper.parentElement === row &&
+      marker.parentElement === wrapper &&
+      wrapper.getAttributeNames().length === 1 &&
+      wrapper.getAttribute("class") === "accordion-atc-group-item" &&
+      wrapper.children.length === 1 &&
+      wrapper.firstElementChild === marker &&
+      !wrapper.textContent?.trim() &&
+      wrapper.matches(
+        ".accordion-atc-group-row > .accordion-atc-group-item:not(:has(* > *))",
+      );
     const activeAncestors = (el: Element) => {
       for (let node: Element | null = el; node; node = node.parentElement) {
         const style = getComputedStyle(node);
@@ -94,7 +113,7 @@ export async function getModernProductOffer(
           node.matches(
             'template,[hidden],[aria-hidden="true"],[aria-selected="false"],[aria-expanded="false"],[data-selected="false"],[data-active="false"]',
           ) ||
-          style.display === "none" ||
+          (style.display === "none" && !emptyMetadataWrapper(el, node)) ||
           style.visibility === "hidden" ||
           style.visibility === "collapse"
         )
