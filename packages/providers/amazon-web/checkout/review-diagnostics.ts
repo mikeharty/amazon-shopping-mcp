@@ -87,6 +87,7 @@ export async function readModernReviewDiagnostics(page: Page, value: unknown, co
       const lineIdentityHashes: { source: string; namespace: 'row_index' | 'line_identity'; sha256: string }[] = [];
       const urlMetadata: { source: string; path?: string; queryKeys: string[] }[] = [];
       const urlEncodingShapes: { jsonString: boolean; percentEncoded: boolean; decoded: boolean }[] = [];
+      const parameterNames: string[] = [];
       const auiStructure: { source: string; fields: { path: string; type: string }[] }[] = [];
       const safeName = (value: string) => /^[A-Za-z][A-Za-z0-9_.:-]{0,59}$/.test(value) && !/(?:secret|credential|token|password|cvv|cardnumber)/i.test(value);
       const inputFields = Array.from(el.querySelectorAll<HTMLInputElement>('input')).filter(live => itemOwner(live) === el).slice(0, 40).map(input => ({ type: input.type, ...(safeName(input.name) ? { name: input.name } : {}) }));
@@ -140,6 +141,12 @@ export async function readModernReviewDiagnostics(page: Page, value: unknown, co
             if (depth > 5 || shapeFields.length >= 60) return;
             if (typeof value === 'string' && value.length <= 100_000 && /^\s*[\[{]/.test(value)) { try { shape(JSON.parse(value), path, depth + 1); } catch {} return; }
             if (!value || typeof value !== 'object') return;
+            if (!Array.isArray(value)) {
+              const pair = value as Record<string, unknown>;
+              if (typeof pair.name === 'string' && safeName(pair.name) && parameterNames.length < 40) {
+                parameterNames.push(pair.name);
+              }
+            }
             if (Array.isArray(value)) { for (const child of value.slice(0, 5)) shape(child, `${path}[]`, depth + 1); return; }
             for (const [key, child] of Object.entries(value)) {
               if (!safeName(key) || shapeFields.length >= 60) continue;
@@ -207,6 +214,10 @@ export async function readModernReviewDiagnostics(page: Page, value: unknown, co
           }
           stepperMetadata.push({ ...(safeName(component) ? { component } : {}), ...(safeName(node.getAttribute('name') ?? '') ? { name: node.getAttribute('name') } : {}), ...(/^\d{1,3}$/.test(value) ? { numericState: Number(value) } : {}), numericLeaves: [node, ...Array.from(node.querySelectorAll<HTMLElement>('*'))].filter(child => visible(child) && !child.children.length).map(child => rendered(child).trim()).filter(text => /^\d{1,3}$/.test(text)).slice(0, 20).map(Number), ancestors });
         }
+        if (node.getAttribute('name') === 'checkout-quantity-stepper' && component === 'stepper' && value && /^\d{1,3}$/.test(value) && Number(value) > 0) {
+          const displayed = [node, ...Array.from(node.querySelectorAll<HTMLElement>('*'))].filter(child => visible(child) && !child.children.length).map(child => rendered(child).trim()).filter(text => /^\d{1,3}$/.test(text)).map(Number);
+          if (displayed.length && displayed.every(number => number === Number(value))) quantityObservations.push({ source: 'named_checkout_quantity_stepper_state_and_display', quantity: Number(value) });
+        }
         let semanticWrapper: HTMLElement | undefined;
         for (let candidate: HTMLElement | null = node; candidate && itemOwner(candidate) === el; candidate = candidate.parentElement) {
           if (/^Change quantity of\s+\S/i.test(candidate.getAttribute('aria-label') ?? '') && visible(candidate)) { semanticWrapper = candidate; break; }
@@ -238,7 +249,7 @@ export async function readModernReviewDiagnostics(page: Page, value: unknown, co
       }
       const attributeNames = [...new Set(owned.flatMap((node) => node.getAttributeNames()))].filter((name) => /^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/.test(name)).slice(0, 80);
       return { id: el.id, observedLines: lines(el), links, structure: structure(el), selections: selections(el), attributeNames,
-        ...(publicIdentity.length ? { publicIdentity: publicIdentity.slice(0, 40) } : {}), ...(urlMetadata.length ? { urlMetadata } : {}), ...(urlEncodingShapes.length ? { urlEncodingShapes } : {}), ...(auiStructure.length ? { auiStructure } : {}), ...(inputFields.length ? { inputFields } : {}), ...(stepperMetadata.length ? { stepperMetadata } : {}), ...(lineBound && explicitEnumObservations.length ? { explicitEnumObservations: explicitEnumObservations.slice(0, 40) } : {}), ...(quantityObservations.length ? { quantityObservations: quantityObservations.slice(0, 20) } : {}), ...(offerTokenHashes.length ? { offerTokenHashes } : {}), ...(lineIdentityHashes.length ? { lineIdentityHashes } : {}), ...(selectedOfferHashes.length ? { selectedOfferHashes } : {}), ...(auiState.length ? { auiState } : {}) };
+        ...(publicIdentity.length ? { publicIdentity: publicIdentity.slice(0, 40) } : {}), ...(urlMetadata.length ? { urlMetadata } : {}), ...(urlEncodingShapes.length ? { urlEncodingShapes } : {}), ...(parameterNames.length ? { parameterNames: [...new Set(parameterNames)] } : {}), ...(auiStructure.length ? { auiStructure } : {}), ...(inputFields.length ? { inputFields } : {}), ...(stepperMetadata.length ? { stepperMetadata } : {}), ...(lineBound && explicitEnumObservations.length ? { explicitEnumObservations: explicitEnumObservations.slice(0, 40) } : {}), ...(quantityObservations.length ? { quantityObservations: quantityObservations.slice(0, 20) } : {}), ...(offerTokenHashes.length ? { offerTokenHashes } : {}), ...(lineIdentityHashes.length ? { lineIdentityHashes } : {}), ...(selectedOfferHashes.length ? { selectedOfferHashes } : {}), ...(auiState.length ? { auiState } : {}) };
     }));
     const recognizedKeys = new Set(['checkout','checkoutstate','state','data','items','item','lineitems','lineitem','product','products','offer','offers','offering','asin','sku','condition','conditiontype','purchasemode','purchaseoption','sellerid','merchantid','quantity','price','unitprice','subtotal','shipping','shippingcharge','tax','discount','total','ordertotal','giftcard','giftcardcredit','giftcardamount','payment','payments','amount','currency','offeringid','offerlistingid']);
     const financialKeys = new Set(['asin','sku','condition','conditiontype','purchasemode','purchaseoption','sellerid','merchantid','quantity','price','unitprice','subtotal','shipping','shippingcharge','tax','discount','total','ordertotal','giftcard','giftcardcredit','giftcardamount','amount','currency','offeringid','offerlistingid']);

@@ -143,6 +143,22 @@ describe('Non-executable modern review diagnostics', () => {
     }] } } });
     expect(JSON.stringify(result)).not.toMatch(/SECRET_|unknownCredential/);
   });
+  it('reads the observed named checkout quantity stepper only when all displayed numbers agree', async () => {
+    html = html.replace('</article>', '<div name="checkout-quantity-stepper" data-a-component="stepper" data-steppervalue="1"><span>1</span><span>1</span></div></article>');
+    const result = await provider.read('checkout_get', { url }, ctx);
+    expect((result.data as {sections:{items:Record<string,unknown>[]}}).sections.items[0]!.quantityObservations).toEqual([{source:'named_checkout_quantity_stepper_state_and_display',quantity:1}]);
+  });
+  it('inspects parameter names while withholding all parameter values', async () => {
+    const payload = JSON.stringify({ parameters: JSON.stringify([{ name: 'asin', value: 'B0FIXTURE1' }, { name: 'purchaseMode', value: 'one_time' }, { name: 'shippingChoice', value: 'PRIVATE_VALUE' }, { name: 'password', value: 'SECRET_VALUE' }]) });
+    html = html.replace('</article>', `<div data-postdata='${payload}'>Control</div></article>`);
+    const result = await provider.read('checkout_get', { url }, ctx);
+    const item = (result.data as {sections:{items:Record<string,unknown>[]}}).sections.items[0]!;
+    expect(item.parameterNames).toEqual(['asin', 'purchaseMode', 'shippingChoice']);
+    expect(item.publicIdentity).toBeUndefined();
+    expect(item.explicitEnumObservations).toBeUndefined();
+    expect(JSON.stringify(result)).not.toMatch(/PRIVATE_VALUE|SECRET_VALUE|password/);
+    expect(result).toMatchObject({status:'partial',data:{executableTerms:false}});
+  });
   it('reads bounded nested JSON, separates row indices and observes a semantic quantity wrapper', async () => {
     const payload = JSON.stringify({ lineItems: JSON.stringify({ asin: 'B0FIXTURE1', condition: 'New', purchaseMode: 'one_time', lineItemId: 'SECRET_LINE', credential: 'SECRET_NESTED' }) });
     html = html.replace('id="checkout-item-block-0"', 'id="checkout-item-block-0" data-line-item-id="0" data-lineitemid="SECRET_LINE"')
