@@ -19,6 +19,22 @@ describe('Complete physical delivery identity', () => {
   it('preserves meaningful number punctuation', () => {
     expect(samePhysicalAddress(parseAddressLines(home.map((line) => line.replace('4B', '4.2'))), parseAddressLines(home.map((line) => line.replace('4B', '42'))))).toBe(false);
   });
+  it('parses the observed complete comma-delimited saved address span from the right', () => {
+    const observed = ['Jamie Example', '123 Example Street APT 4B, Seattle, WA, 98101-1234, United States', 'Phone number: 2065550100', 'Edit address\n | Add delivery instructions'];
+    expect(samePhysicalAddress(parseAddressLines(observed), parseAddressLines(home))).toBe(true);
+    expect(parseAddressLines(observed)?.addressLines).toEqual(['123 EXAMPLE ST APT 4B']);
+    expect(samePhysicalAddress(parseAddressLines(observed.map((line) => line.replace('4B', '4.2'))), parseAddressLines(observed.map((line) => line.replace('4B', '42'))))).toBe(false);
+  });
+  it.each([
+    '123 Example St APT 4B, Seattle, WA, 98101-1234',
+    '123 Example St APT 4B, Seattle, WA, United States',
+    '123 Example St APT 4B, Seattle, 98101-1234, United States',
+    '123 Example St APT 4B, WA, 98101-1234, United States',
+    'Seattle, WA, 98101-1234, United States',
+    '123 Example St APT 4B, Seattle, WA, 98101-1234, Canada',
+  ])('rejects incomplete or unsupported comma-delimited address: %s', (address) => {
+    expect(parseAddressLines(['Jamie Example', address, 'Edit address\n | Add delivery instructions'])).toBeUndefined();
+  });
   it.each([
     ['unit', ['Jamie Example', '123 Example St', 'Apt 5B', 'Seattle, WA 98101-1234', 'US']],
     ['missing unit', ['Jamie Example', '123 Example St', 'Seattle, WA 98101-1234', 'US']],

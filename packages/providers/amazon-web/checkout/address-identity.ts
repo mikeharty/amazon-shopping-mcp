@@ -14,7 +14,7 @@ const countryPattern = /(?:United States(?: of America)?|USA?|U\.S\.(?:A\.?)?)$/
 export function parseAddressLines(observed: readonly string[]): ShippingIdentity | undefined {
   if (!observed.length || observed.length > 30 || observed.some((line) => typeof line !== 'string' || line.length > 1000)) return undefined;
   const lines = observed.flatMap((line) => line.split(/\r?\n/)).map((line) => line.normalize('NFKC').replace(/\s+/g, ' ').trim()).filter(Boolean)
-    .filter((line) => !/^(?:phone(?: number)?|tel(?:ephone)?)\s*:\s*\+?[\d ().-]+(?:\s*(?:ext\.?|x)\s*\d+)?(?:\s+Edit address(?:\s*\|\s*Add delivery instructions)?)?$/i.test(line) && !/^(?:Edit|Change)(?: address)?$/i.test(line));
+    .filter((line) => !/^(?:phone(?: number)?|tel(?:ephone)?)\s*:\s*\+?[\d ().-]+(?:\s*(?:ext\.?|x)\s*\d+)?(?:\s+Edit address(?:\s*\|\s*Add delivery instructions)?)?$/i.test(line) && !/^(?:Edit|Change)(?: address)?$/i.test(line) && !/^\|\s*Add delivery instructions$/i.test(line));
   // Country may occupy its own direct span or trail the city/region/postcode span.
   const last = lines.at(-1);
   if (!last) return undefined;
@@ -23,6 +23,13 @@ export function parseAddressLines(observed: readonly string[]): ShippingIdentity
   const beforeCountry = last.slice(0, match.index).replace(/[,\s]+$/, '');
   lines.pop();
   if (beforeCountry) lines.push(beforeCountry);
+  // Observed modern saved rows put the full street/locality in one comma-delimited
+  // span after the recipient. Parse from the right; never supply absent fields.
+  if (lines.length === 2) {
+    const combined = lines[1]!.match(/^(.+),\s*([^,]+),\s*([A-Za-z ]+),\s*(\d{5}(?:-\d{4})?)$/);
+    if (!combined) return undefined;
+    lines.splice(1, 1, combined[1]!.trim(), `${combined[2]!.trim()}, ${combined[3]!.trim()} ${combined[4]!}`);
+  }
   if (lines.length < 3 || lines.length > 5) return undefined;
   const cityLine = lines.at(-1)!.match(/^(.+?),\s*([A-Za-z ]+?)(?:,\s*|\s+)(\d{5}(?:-\d{4})?)$/);
   if (!cityLine) return undefined;

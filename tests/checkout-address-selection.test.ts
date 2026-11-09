@@ -4,13 +4,13 @@ import { AmazonWebProvider } from '../packages/providers/amazon-web/provider.js'
 import type { ProviderContext, Result } from '../packages/contracts/index.js';
 
 const ctx: ProviderContext = { ownerId: 'fixture-owner', accountRef: 'fixture-account', marketplace: 'amazon.com', sessionGeneration: 7 };
-const addressUrl = 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address?isBuyNow=1&pipelineType=Chewbacca';
+const addressUrl = 'https://www.amazon.com/checkout/p/p-123-1111111-2222222/address?isBuyNow=1&pipelineType=Chewbacca&referrer=checkout';
 const reviewUrl = addressUrl.replace('/address?', '/review?');
 const greeting = '<span id="nav-link-accountList-nav-line-1">Hello, Fixture</span>';
 const parts = '<span>Fixture Owner</span><span>123 Example St</span><span>Apt 4</span><span>Seattle, WA 98101</span><span>United States</span>';
 const applied = `<main id="checkout-delivery-address-panel" data-address-id="fixture-home"><div class="destination-data-alignment">${parts}</div></main>`;
 function row(checked = true) {
-  return `<span id="select-destination-on-sasp-desktop-panel-id-fixture" data-action="select-destination-on-sasp-desktop-panel" data-select-destination-on-sasp-desktop-panel="fixture"><div class="a-radio" data-a-input-name="destinationSubmissionUrl"><label><input type="radio" name="destinationSubmissionUrl" ${checked ? 'checked' : ''} value="/checkout/p/p-106-9344849-4773810/address/shiptodestination?pipelineType=Chewbacca&amp;isBuyNow=1&amp;addressID=fixture-home&amp;action=select&amp;encoding=UTF8"><div class="destination-data-alignment">${parts}<span>Phone number: 206-555-0100</span></div></label></div></span>`;
+  return `<span id="select-destination-on-sasp-desktop-panel-id-fixture" data-action="select-destination-on-sasp-desktop-panel" data-select-destination-on-sasp-desktop-panel="fixture"><div class="a-radio" data-a-input-name="destinationSubmissionUrl"><label><input type="radio" name="destinationSubmissionUrl" ${checked ? 'checked' : ''} value="/checkout/p/p-123-1111111-2222222/address/shiptodestination?pipelineType=Chewbacca&amp;isBuyNow=1&amp;addressID=fixture-home&amp;action=select-shipping&amp;encoding=UTF8&amp;referrer=checkout&amp;ref_=address_select"><div class="destination-data-alignment">${parts}<span>Phone number: 206-555-0100</span></div></label></div></span>`;
 }
 function addressPage(checked = true) {
   return `<main id="shipping-address-selection-panel">${row(checked)}</main><span id="checkout-primary-continue-button-id" class="a-button-primary continue-button primary-action-button"><span class="a-button-inner"><input type="submit" data-testid="bottom-continue-button"><span id="checkout-primary-continue-button-id-announce">Deliver to this address</span></span></span><script>document.querySelector('#checkout-primary-continue-button-id input').addEventListener('click',e=>{e.preventDefault();location.href=${JSON.stringify(reviewUrl)}})</script>`;
@@ -50,6 +50,11 @@ describe('Journal-adapter address selection without ordering', () => {
     reviewHtml = applied.replace(' data-address-id="fixture-home"', '');
     expect(await provider.mutate('checkout_address_select', await input(), ctx)).toMatchObject({ status: 'ok', data: { verification: 'physical_destination_only' } });
   });
+  it('retains exact legacy select action support alongside observed modern select-shipping', async () => {
+    addressHtml = addressHtml.replace('action=select-shipping', 'action=select');
+    expect(await provider.mutate('checkout_address_select', await input(), ctx)).toMatchObject({ status: 'ok', data: { orderSubmitted: false } });
+    expect(continueRequests).toBe(1);
+  });
   it.each(['expectedRevision','expectedContextFingerprint','addressRef','expectedFingerprint','expectedSessionGeneration'])('blocks stale or changed %s before any effect', async (field) => {
     const args = await input();
     (args as Record<string, unknown>)[field] = field === 'expectedSessionGeneration' ? 6 : '0'.repeat(64);
@@ -57,7 +62,10 @@ describe('Journal-adapter address selection without ordering', () => {
     expect(continueRequests).toBe(0);
   });
   it.each([
-    ['edit action', 'action=select', 'action=edit'],
+    ['edit action', 'action=select-shipping', 'action=edit'],
+    ['diagnostic-only action', 'action=select-shipping', 'action=shipToThisAddress'],
+    ['default action', 'action=select-shipping', 'action=setDefaultAddress'],
+    ['create action', 'action=select-shipping', 'action=createAddress'],
     ['wrong pipeline', 'pipelineType=Chewbacca&amp;isBuyNow=1&amp;addressID', 'pipelineType=Other&amp;isBuyNow=1&amp;addressID'],
     ['duplicate destination', 'addressID=fixture-home', 'addressID=fixture-home&amp;addressID=other'],
     ['order label', 'Deliver to this address', 'Place your order'],

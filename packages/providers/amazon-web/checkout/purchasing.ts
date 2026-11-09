@@ -106,11 +106,18 @@ async function readAddressLayoutDiagnostics(page: Page) {
       }
       const modernAddressControls = Array.from(document.querySelectorAll<HTMLElement>('#shipping-address-selection-panel span[id^="select-destination-on-sasp-desktop-panel-id-"][data-select-destination-on-sasp-desktop-panel]')).filter(visible).slice(0, 20).map((row) => {
         const radios = row.querySelectorAll<HTMLInputElement>('input[type="radio"][name="destinationSubmissionUrl"]');
-        let destination: { path: string; queryKeys: string[]; selectionAction?: string } | undefined;
+        let destination: { path: string; queryKeys: string[]; selectionAction?: string; actionParamCount: number; actionNonempty: boolean; actionShape: string } | undefined;
         if (radios.length === 1 && /^(?:\/(?!\/)|https:\/\/)/.test(radios[0]!.value) && visible(row)) {
           try {
             const url = new URL(radios[0]!.value, location.href);
-            if (url.origin === 'https://www.amazon.com' && !url.username && !url.password && !url.hash && /^\/checkout\/p\/p-\d{3}-\d{7}-\d{7}\/address(?:\/[A-Za-z0-9_-]+)*$/.test(url.pathname)) destination = { path: url.pathname, queryKeys: [...new Set(url.searchParams.keys())].filter((key) => identifier(key) !== undefined).slice(0, 40), selectionAction: url.searchParams.get('action') === 'select' ? 'select' : undefined };
+            const actionNames = ['select', 'shipToThisAddress', 'shipToThisDestination', 'selectAddress', 'selectDestination', 'shipTo', 'ship', 'select-address'];
+            const rawAction = url.searchParams.get('action');
+            const actionValues = url.searchParams.getAll('action');
+            const actionWords = ['select', 'shipping', 'ship', 'to', 'destination', 'address', 'set', 'use', 'this', 'current', 'default', 'update', 'delivery', 'continue', 'with', 'existing', 'saved', 'action'];
+            const words = rawAction?.replace(/([A-Z])([A-Z][a-z])/g, '$1 $2').replace(/([a-z])([A-Z])/g, '$1 $2').split(/[ _-]+/).map((word) => word.toLowerCase()).filter(Boolean) ?? [];
+            const descriptiveAction = url.pathname === `${location.pathname}/shiptodestination` && rawAction && /^[A-Za-z][A-Za-z_-]{0,63}$/.test(rawAction) && words.length > 0 && words.every((word) => actionWords.includes(word)) ? rawAction : undefined;
+            const selectionAction = actionValues.length === 1 ? actionNames.find((name) => name.toLowerCase() === rawAction?.toLowerCase()) ?? descriptiveAction : undefined;
+            if (url.origin === 'https://www.amazon.com' && !url.username && !url.password && !url.hash && /^\/checkout\/p\/p-\d{3}-\d{7}-\d{7}\/address(?:\/[A-Za-z0-9_-]+)*$/.test(url.pathname)) destination = { path: url.pathname, queryKeys: [...new Set(url.searchParams.keys())].filter((key) => identifier(key) !== undefined).slice(0, 40), selectionAction, actionParamCount: actionValues.length, actionNonempty: actionValues.some((value) => value.length > 0), actionShape: actionValues.length === 0 ? 'absent' : actionValues.every((value) => /^[A-Za-z][A-Za-z_-]{0,63}$/.test(value)) ? 'ascii_words' : 'other' };
           } catch { /* Invalid or non-URL radio payloads remain unobserved. */ }
         }
         return { id: identifier(row.id), dataAction: row.getAttribute('data-action') === 'select-destination-on-sasp-desktop-panel' ? 'select-destination-on-sasp-desktop-panel' : undefined, radioName: radios.length === 1 ? 'destinationSubmissionUrl' : undefined, destination };

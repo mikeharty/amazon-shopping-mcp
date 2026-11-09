@@ -102,7 +102,7 @@ describe.skipIf(!connection)("Real MCP, owner approval, Postgres journal and fix
   });
   it('journals selection idempotently, gates disabled workers, and quarantines uncertain address effects without creating intents', async () => {
     const account = await store.account(owner);
-    const args = { accountRef: account.id, url: 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address', idempotencyKey: 'address-write-idempotency', expectedRevision: 'a'.repeat(64), expectedContextFingerprint: 'b'.repeat(64), expectedSessionGeneration: 1, addressRef: 'c'.repeat(64), expectedFingerprint: 'd'.repeat(64) };
+    const args = { accountRef: account.id, url: 'https://www.amazon.com/checkout/p/p-123-1111111-2222222/address', idempotencyKey: 'address-write-idempotency', expectedRevision: 'a'.repeat(64), expectedContextFingerprint: 'b'.repeat(64), expectedSessionGeneration: 1, addressRef: 'c'.repeat(64), expectedFingerprint: 'd'.repeat(64) };
     const pending = await call('checkout_address_select', args);
     expect(pending.status).toBe('pending');
     expect(await call('checkout_address_select', args)).toMatchObject({ operationId: pending.operationId });

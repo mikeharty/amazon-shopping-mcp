@@ -14,7 +14,7 @@ describe("Owner-private checkout address read registration", () => {
     const tool = createRegistry(store, options).tools.find((item) => item.name === 'checkout_address_select')!;
     expect(tool.annotations).toMatchObject({ readOnlyHint: false, idempotentHint: true });
     const request = new Request('http://127.0.0.1/mcp');
-    const args = { accountRef: 'fixture-account', url: 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address', idempotencyKey: 'stable-address-selection', expectedRevision: 'a'.repeat(64), expectedContextFingerprint: 'b'.repeat(64), expectedSessionGeneration: 7, addressRef: 'c'.repeat(64), expectedFingerprint: 'd'.repeat(64) };
+    const args = { accountRef: 'fixture-account', url: 'https://www.amazon.com/checkout/p/p-123-1111111-2222222/address', idempotencyKey: 'stable-address-selection', expectedRevision: 'a'.repeat(64), expectedContextFingerprint: 'b'.repeat(64), expectedSessionGeneration: 7, addressRef: 'c'.repeat(64), expectedFingerprint: 'd'.repeat(64) };
     expect((await tool.handler(args, { request, owner: { id: 'fixture-owner', scopes: ['account:read'] } })).structuredContent).toMatchObject({ status: 'failed', error: { code: 'FORBIDDEN' } });
     expect((await tool.handler({ ...args, accountRef: 'foreign-account' }, { request, owner: { id: 'fixture-owner', scopes: ['checkout:prepare'] } })).structuredContent).toMatchObject({ status: 'failed', error: { code: 'NOT_FOUND' } });
     expect(starts).toHaveLength(0);
@@ -35,7 +35,7 @@ describe("Owner-private checkout address read registration", () => {
     const options = { liveEnabled: true, retainObservations: false, origin: 'http://127.0.0.1', purchasingEnabled: true };
     const tool = createRegistry(store, options).tools.find((item) => item.name === 'checkout_addresses_get')!;
     expect(tool.annotations.readOnlyHint).toBe(true);
-    const input = { accountRef: 'fixture-account', url: 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address' };
+    const input = { accountRef: 'fixture-account', url: 'https://www.amazon.com/checkout/p/p-123-1111111-2222222/address' };
     const request = new Request('http://127.0.0.1/mcp');
     const owner = { id: 'fixture-owner', scopes: ['account:read'] };
     expect((await tool.handler(input, { request, owner: { ...owner, scopes: [] } })).structuredContent).toMatchObject({ status: 'failed', error: { code: 'FORBIDDEN' } });

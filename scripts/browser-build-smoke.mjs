@@ -27,7 +27,7 @@ try {
     });
   });
   html = await readFile(new URL('../tests/fixtures/checkout-addresses.html', import.meta.url), 'utf8');
-  const addressRead = await provider.read('checkout_addresses_get', { url: 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address' }, {
+  const addressRead = await provider.read('checkout_addresses_get', { url: 'https://www.amazon.com/checkout/p/p-123-1111111-2222222/address' }, {
     ownerId: 'fixture-owner', accountRef: 'fixture-account', marketplace: 'amazon.com', sessionGeneration: runtime.sessionGeneration,
   });
   assert.equal(addressRead.status, 'ok', 'Address read must run in compiled Chromium');
@@ -36,7 +36,7 @@ try {
   assert.doesNotMatch(JSON.stringify(addressRead), /fixture-private|fixture-secret/);
   addressSelectionSmoke = true;
   const addressContext = { ownerId: 'fixture-owner', accountRef: 'fixture-account', marketplace: 'amazon.com', sessionGeneration: runtime.sessionGeneration };
-  const addressUrl = 'https://www.amazon.com/checkout/p/p-106-9344849-4773810/address?isBuyNow=1&pipelineType=Chewbacca';
+  const addressUrl = 'https://www.amazon.com/checkout/p/p-123-1111111-2222222/address?isBuyNow=1&pipelineType=Chewbacca';
   const modernSnapshot = await provider.read('checkout_addresses_get', { url: addressUrl }, addressContext);
   assert.equal(modernSnapshot.status, 'ok');
   const targetAddress = modernSnapshot.data.addresses[0];
