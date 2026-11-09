@@ -169,6 +169,19 @@ describe('Independent rendered shipping proof', () => {
     expect(result?.knownHeaderLabels).toEqual(['Change shipping destination']);
     expect(result?.physicalIdentity).toBeUndefined();
   });
+  it.each([false, true])('separates a wrapped address from the native recipient link with duplicate redirect reason=%s', async (duplicate) => {
+    const context = await browser.newContext({ offline: true }); const page = await context.newPage();
+    try {
+      const query = 'pipelineType=Chewbacca&amp;isBuyNow=1&amp;redirectReason=delivery_change' + (duplicate ? '&amp;redirectReason=other' : '');
+      const body = `<main id="checkout-experience-container"><section id="checkout-delivery-address-panel"><section id="checkout-deliveryAddressPanel"><a id="change-delivery-link" href="/checkout/p/p-123-1111111-2222222/address?${query}">Delivering to Jamie Example<div id="deliver-to-address-text">${addressOnly}</div></a></section></section></main>`;
+      await page.route('**/*', (route) => route.fulfill({ contentType: 'text/html', body }));
+      await page.goto('https://www.amazon.com/checkout/p/p-123-1111111-2222222/spc?pipelineType=Chewbacca&isBuyNow=1');
+      const result = await readAppliedShippingEvidence(page);
+      expect(samePhysicalAddress(result?.physicalIdentity, parseAddressLines(home))).toBe(!duplicate);
+      expect(result?.knownHeaderControls?.[0]?.text).toBe('Delivering to Jamie Example');
+      expect(result?.lines).toEqual([addressOnly]);
+    } finally { await context.close(); }
+  });
   it('rejects the known recipient link outside the same checkout experience', async () => {
     const result = await readLinkedHeader('<a id="change-delivery-link" href="/checkout/p/p-123-1111111-2222222/address">Delivering to Jamie Example</a>', true);
     expect(result?.physicalIdentity).toBeUndefined(); expect(result?.knownHeaderControls).toBeUndefined();

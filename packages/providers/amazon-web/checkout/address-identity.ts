@@ -101,7 +101,7 @@ export async function readAppliedShippingEvidence(page: Page): Promise<AppliedSh
     if (headerLinks.length === 1 && experience?.contains(headerLinks[0]!)) {
       const link = headerLinks[0]!;
       const labelText = (value: string) => value.replace(/\s+/g, ' ').trim().slice(0, 1000);
-      const text = labelText(Array.from(link.childNodes).map((node) => renderedText(node)).join(''));
+      const text = labelText(Array.from(link.childNodes).map((node) => renderedText(node, root)).join(''));
       const ariaLabel = labelText(link.getAttribute('aria-label') ?? '');
       const ancestorIds: string[] = [];
       for (let node: Element | null = link.parentElement; node && ancestorIds.length < 8; node = node.parentElement) {
@@ -116,7 +116,7 @@ export async function readAppliedShippingEvidence(page: Page): Promise<AppliedSh
           queryKeys = [...new Set(destination.searchParams.keys())].filter((key) => /^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/.test(key)).slice(0, 30);
         }
         const purchase = current.pathname.match(/^\/checkout\/p\/(p-\d{3}-\d{7}-\d{7})\//)?.[1];
-        const allowed = ['ref', 'ref_', 'referrer', 'pipelineType', 'isBuyNow', 'hasWorkingJavascript', 'purchaseId', 'checkoutSessionId'];
+        const allowed = ['ref', 'ref_', 'referrer', 'redirectReason', 'pipelineType', 'isBuyNow', 'hasWorkingJavascript', 'purchaseId', 'checkoutSessionId'];
         const safe = link instanceof HTMLAnchorElement && purchase && current.origin === 'https://www.amazon.com' && destination.origin === current.origin && !destination.username && !destination.password && !destination.hash && destination.pathname === `/checkout/p/${purchase}/address` &&
           [...destination.searchParams.keys()].every((key) => allowed.includes(key) && destination.searchParams.getAll(key).length === 1) &&
           ['pipelineType', 'isBuyNow', 'purchaseId', 'checkoutSessionId'].every((key) => !destination.searchParams.has(key) || JSON.stringify(destination.searchParams.getAll(key)) === JSON.stringify(current.searchParams.getAll(key)));

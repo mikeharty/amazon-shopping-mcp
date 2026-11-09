@@ -34,7 +34,7 @@ export async function readModernReviewDiagnostics(page: Page, value: unknown, co
   await page.goto(value, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   if (!validUrl(page.url()) || routingIdentity(page.url()) !== routingIdentity(value)) return unsupported('modern_review_context_changed');
   if ((await classifyPage(page)).kind !== 'ready' || await hasAuthForm(page)) return authRequired();
-  const raw = await page.evaluate(() => {
+  const raw = await page.evaluate(async () => {
     const visible = (el: Element) => (el as HTMLElement).getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
     const roots = Array.from(document.querySelectorAll<HTMLElement>('#checkout-experience-container')).filter(visible);
     if (roots.length !== 1) return undefined;
@@ -65,7 +65,11 @@ export async function readModernReviewDiagnostics(page: Page, value: unknown, co
     }).slice(0, 20);
     const itemRoots = Array.from(itemPanel.querySelectorAll<HTMLElement>('[id^="checkout-item-block-"]')).filter(visible)
       .filter((el) => /^checkout-item-block-\d+$/.test(el.id));
-    const items = itemRoots.slice(0, 20).map((el) => {
+    const itemOwner = (node: Element): HTMLElement | undefined => {
+      for (let parent: Element | null = node; parent && parent !== itemPanel; parent = parent.parentElement) if (/^checkout-item-block-\d+$/.test(parent.id)) return parent as HTMLElement;
+      return undefined;
+    };
+    const items = await Promise.all(itemRoots.slice(0, 20).map(async (el) => {
       const links = Array.from(el.querySelectorAll<HTMLAnchorElement>('a[href]')).filter(visible).flatMap((link) => {
         try {
           const url = new URL(link.href);
@@ -76,7 +80,75 @@ export async function readModernReviewDiagnostics(page: Page, value: unknown, co
           return asin || sellerId ? [{ ...(asin ? { asin } : {}), ...(sellerId ? { sellerId } : {}) }] : [];
         } catch { return []; }
       });
-      return { id: el.id, observedLines: lines(el), links, structure: structure(el), selections: selections(el) };
+      const owned = [el, ...Array.from(el.querySelectorAll<HTMLElement>('*')).filter(visible)].filter((node) => itemOwner(node) === el);
+      const publicIdentity: { source: string; asin: string }[] = [];
+      const explicitEnumObservations: { source: string; value: string }[] = [];
+      const liveItemField = (node: HTMLElement) => {
+        if (itemOwner(node) !== el) return false;
+        for (let parent = node.parentElement; parent && parent !== el; parent = parent.parentElement) {
+          const style = getComputedStyle(parent); if (style.display === 'none' || style.visibility === 'hidden' || parent.matches('template')) return false;
+        }
+        return true;
+      };
+      for (const node of owned) {
+        for (const name of ['data-asin', 'data-csa-c-item-id', 'data-sku']) {
+          const value = node.getAttribute(name);
+          if (value && /^[A-Z0-9]{10}$/i.test(value)) publicIdentity.push({ source: name, asin: value.toUpperCase() });
+        }
+        for (const name of ['data-condition', 'data-condition-type', 'data-purchase-mode']) {
+          const value = node.getAttribute(name);
+          const valid = name === 'data-purchase-mode' ? /^(?:one_time|subscribe_and_save)$/i : /^(?:New|Used|Renewed|Used - Like New|Used - Very Good|Used - Good|Used - Acceptable)$/i;
+          if (value && valid.test(value)) explicitEnumObservations.push({ source: name, value });
+        }
+      }
+      // The only raw hidden value admitted is the known public ASIN field of this
+      // visible item. Offer values remain inside Chromium and leave only as hashes.
+      for (const input of Array.from(el.querySelectorAll<HTMLInputElement>('input#ASIN, input[name="ASIN"], input[name="asin"]'))) {
+        if (liveItemField(input) && /^[A-Z0-9]{10}$/i.test(input.value)) publicIdentity.push({ source: 'public_asin_input', asin: input.value.toUpperCase() });
+      }
+      const quantityObservations: { source: string; quantity: number }[] = [];
+      for (const control of Array.from(el.querySelectorAll<HTMLInputElement | HTMLSelectElement>('select, input[type="number"]')).filter(visible)) {
+        if (itemOwner(control) !== el || !/^(?:quantity|itemQuantity|quantityDropdown)(?:[._-]\d+)?$/i.test(control.name || control.id)) continue;
+        const selected = control instanceof HTMLSelectElement ? (control.selectedOptions.length === 1 ? control.selectedOptions[0]!.value : undefined) : control.value;
+        if (selected && /^\d{1,3}$/.test(selected) && Number(selected) > 0) quantityObservations.push({ source: control instanceof HTMLSelectElement ? 'selected_quantity_option' : 'quantity_number_input', quantity: Number(selected) });
+      }
+      const asins = [...new Set([...publicIdentity.map((entry) => entry.asin), ...links.flatMap((entry) => entry.asin ? [entry.asin] : [])])];
+      const offerTokenHashes: { source: string; asin: string; sha256: string }[] = [];
+      if (asins.length === 1) for (const input of Array.from(el.querySelectorAll<HTMLInputElement>('input[name]')).filter((input) => /^(?:offeringID|offerListingID)(?:\.\d+)?$/i.test(input.name)).slice(0, 20)) {
+        if (!liveItemField(input) || !/^(?:offeringID|offerListingID)(?:\.\d+)?$/i.test(input.name) || !input.value || input.value.length > 4096) continue;
+        const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input.value));
+        offerTokenHashes.push({ source: /offering/i.test(input.name) ? 'offeringID' : 'offerListingID', asin: asins[0]!, sha256: Array.from(new Uint8Array(bytes)).map((byte) => byte.toString(16).padStart(2, '0')).join('') });
+      }
+      const attributeNames = [...new Set(owned.flatMap((node) => node.getAttributeNames()))].filter((name) => /^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/.test(name)).slice(0, 80);
+      return { id: el.id, observedLines: lines(el), links, structure: structure(el), selections: selections(el), attributeNames,
+        ...(publicIdentity.length ? { publicIdentity: publicIdentity.slice(0, 40) } : {}), ...(explicitEnumObservations.length ? { explicitEnumObservations: explicitEnumObservations.slice(0, 40) } : {}), ...(quantityObservations.length ? { quantityObservations: quantityObservations.slice(0, 20) } : {}), ...(offerTokenHashes.length ? { offerTokenHashes } : {}) };
+    }));
+    const recognizedKeys = new Set(['checkout','checkoutstate','state','data','items','item','lineitems','lineitem','product','products','offer','offers','offering','asin','sku','condition','conditiontype','purchasemode','purchaseoption','sellerid','merchantid','quantity','price','unitprice','subtotal','shipping','shippingcharge','tax','discount','total','ordertotal','giftcard','giftcardcredit','giftcardamount','payment','payments','amount','currency','offeringid','offerlistingid']);
+    const financialKeys = new Set(['asin','sku','condition','conditiontype','purchasemode','purchaseoption','sellerid','merchantid','quantity','price','unitprice','subtotal','shipping','shippingcharge','tax','discount','total','ordertotal','giftcard','giftcardcredit','giftcardamount','amount','currency','offeringid','offerlistingid']);
+    const keyForm = (key: string) => key.replace(/[_-]/g, '').toLowerCase();
+    const stateNodes = Array.from(root.querySelectorAll<HTMLElement>('script[type="application/json"], script[type="a-state"], [data-a-state]')).slice(0, 40);
+    const structuredState = stateNodes.flatMap((node) => {
+      for (let ancestor = node.parentElement; ancestor && ancestor !== root; ancestor = ancestor.parentElement) if (!visible(ancestor)) return [];
+      const item = itemOwner(node);
+      if (item && !itemRoots.includes(item)) return [];
+      let stateKey: string | undefined;
+      try { const metadata = JSON.parse(node.getAttribute('data-a-state') ?? '{}'); if (typeof metadata.key === 'string' && recognizedKeys.has(keyForm(metadata.key))) stateKey = metadata.key; } catch { /* Metadata is optional; never evaluate it. */ }
+      const payload = node.matches('script[type="application/json"], script[type="a-state"]') ? node.textContent : node.getAttribute('data-a-state');
+      if (!payload || payload.length > 200_000) return [];
+      const fields: { path: string; type: string }[] = [];
+      const visit = (value: unknown, path: string, depth: number) => {
+        if (depth > 8 || fields.length >= 100 || value === null || typeof value !== 'object') return;
+        if (Array.isArray(value)) { for (const child of value.slice(0, 20)) visit(child, `${path}[]`, depth + 1); return; }
+        for (const [key, child] of Object.entries(value)) {
+          if (!recognizedKeys.has(keyForm(key)) || !/^[A-Za-z][A-Za-z0-9_-]{0,59}$/.test(key)) continue;
+          const next = path ? `${path}.${key}` : key;
+          if (financialKeys.has(keyForm(key))) fields.push({ path: next, type: child === null ? 'null' : Array.isArray(child) ? 'array' : typeof child });
+          visit(child, next, depth + 1);
+          if (fields.length >= 100) break;
+        }
+      };
+      try { visit(JSON.parse(payload), '', 0); } catch { return []; }
+      return stateKey || fields.length ? [{ ...(stateKey ? { stateKey } : {}), ...(item ? { itemId: item.id } : {}), fields }] : [];
     });
     const deliveryPanel = one('#checkout-ship-option-panel');
     const delivery = deliveryPanel ? { observedLines: lines(deliveryPanel), structure: structure(deliveryPanel), selections: selections(deliveryPanel) } : undefined;
@@ -84,7 +156,18 @@ export async function readModernReviewDiagnostics(page: Page, value: unknown, co
     const paymentPanel = one('#checkout-payment-option-panel #checkout-paymentOptionPanel');
     const paymentText = paymentPanel ? rendered(paymentPanel) : '';
     const paymentMatches = [...paymentText.matchAll(/\b(Visa|Mastercard|Amex|American Express|Discover)\b\s*(?:card\s*)?(?:ending in|last four|\*{2,})\s*(\d{4})(?!\d)/gi)];
-    const payment = paymentMatches.length === 1 ? { brand: paymentMatches[0]![1], lastFour: paymentMatches[0]![2], complete: true } : { complete: false };
+    const totalLines = lines(totalPanel);
+    const labelValues: { label: string; value: string }[] = [];
+    const moneyText = /^-?\$\s*\d[\d,]*(?:\.\d{2})?$/;
+    const totalLabel = /^(?:Items(?:\s*\(\d+\))?|Shipping(?:\s*(?:&|and)\s*handling)?|(?:Estimated\s+)?Tax(?:\s+to be collected)?|Discounts?|Promotions?(?:\s+applied)?|Total|Order total|Gift\s*cards?(?:\s*(?:balance|credit|applied))?)\s*:?$/i;
+    for (let index = 0; index < totalLines.length; index++) {
+      const line = totalLines[index]!; const pair = line.match(/^(.*?)\s*:?\s+(-?\$\s*\d[\d,]*(?:\.\d{2})?)$/);
+      if (pair && totalLabel.test(pair[1]!)) labelValues.push({ label: pair[1]!.replace(/:$/, '').trim(), value: pair[2]! });
+      else if (totalLabel.test(line) && moneyText.test(totalLines[index + 1] ?? '')) labelValues.push({ label: line.replace(/:$/, '').trim(), value: totalLines[++index]! });
+    }
+    const giftCardCredits = labelValues.filter((pair) => /^gift\s*card/i.test(pair.label));
+    const payment = { ...(paymentMatches.length === 1 ? { brand: paymentMatches[0]![1], lastFour: paymentMatches[0]![2], complete: true } : { complete: false }),
+      ...(giftCardCredits.length ? { giftCardCreditObserved: true, source: 'displayed_totals_gift_card_line' } : /gift\s*card(?:\s+balance)?\s+(?:applied|used)/i.test(paymentText) ? { giftCardCreditObserved: true, source: 'displayed_selected_payment_text' } : {}) };
     const finalPanel = one('#checkout-pyo-button-block');
     const finalControls = finalPanel ? Array.from(finalPanel.querySelectorAll<HTMLElement>('button, input[type="submit"]')).filter(visible).slice(0, 10).map((el) => {
       const input = el as HTMLInputElement;
@@ -100,7 +183,7 @@ export async function readModernReviewDiagnostics(page: Page, value: unknown, co
       const label = el.getAttribute('aria-label') || (el instanceof HTMLInputElement ? el.value : rendered(el)) || associated || (announce.length === 1 ? rendered(announce[0]!) : '');
       return { id: safeId(el.id), name: safeId(el.getAttribute('name')), label: clean(label), path };
     }) : [];
-    return { items, totals: { observedLines: lines(totalPanel), structure: structure(totalPanel) }, delivery, payment, finalControls };
+    return { items, structuredState, totals: { observedLines: totalLines, structure: structure(totalPanel), labelValues, ...(giftCardCredits.length ? { giftCardCredits } : {}) }, delivery, payment, finalControls };
   });
   if (!raw) return unsupported('modern_review_layout_unrecognized');
   return {

@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { AmazonWebProvider } from '../packages/providers/amazon-web/provider.js';
 import { readModernReviewDiagnostics } from '../packages/providers/amazon-web/checkout/review-diagnostics.js';
+import { createHash } from 'node:crypto';
 
 const url = 'https://www.amazon.com/checkout/p/p-123-1111111-2222222/spc?pipelineType=Chewbacca&isBuyNow=1&hasWorkingJavascript=1';
 const ctx = { ownerId: 'fixture-owner', accountRef: 'fixture-account', marketplace: 'amazon.com' as const, sessionGeneration: 1 };
@@ -28,7 +29,7 @@ describe('Non-executable modern review diagnostics', () => {
     expect(result).toMatchObject({ status: 'partial', observation: { authentication: 'verified' }, data: { diagnosticOnly: true, executableTerms: false, sections: {
       items: [{ id: 'checkout-item-block-0', links: [{ asin: 'B0FIXTURE1' }, { sellerId: 'A1FIXTURE' }] }], payment: { brand: 'Visa', lastFour: '4242', complete: true }, finalControls: [{ label: 'Place your order', path: '/checkout/spc/place-order' }],
     } } });
-    expect(JSON.stringify(result)).not.toMatch(/SECRET_|HIDDEN_ITEM|OUTSIDE_PRIVATE_TEXT|FULL_CARD_PRIVATE|4111|paymentToken|offeringID|purchaseTerms|intentId/);
+    expect(JSON.stringify(result)).not.toMatch(/SECRET_|HIDDEN_ITEM|OUTSIDE_PRIVATE_TEXT|FULL_CARD_PRIVATE|4111|paymentToken|purchaseTerms|intentId/);
     expect(visits).toEqual(['/gp/your-account/order-history', '/checkout/p/p-123-1111111-2222222/spc']);
     await provider.read('checkout_get', { url }, ctx);
     expect(visits.filter((path) => path.includes('order-history'))).toHaveLength(2);
@@ -87,5 +88,45 @@ describe('Non-executable modern review diagnostics', () => {
     const result = await provider.read('checkout_get', { url }, ctx);
     expect(result).toMatchObject({ status: 'partial', data: { sections: { items: [{ links: [{ asin: 'B0FIXTURE1' }, { sellerId: 'A1FIXTURE' }], selections: [{ checked: true, label: 'Friday delivery' }] }], finalControls: [{ label: 'Place your order' }] } } });
     expect(JSON.stringify(result)).not.toContain('SECRET_ITEM_DELIVERY'); expect(submissions).toBe(0);
+  });
+  it('reads only explicit selected-item public identity, typed enums, quantity state and hashed offer linkage', async () => {
+    html = html.replace('id="checkout-item-block-0"', 'id="checkout-item-block-0" data-asin="B0FIXTURE1" data-condition="New" data-purchase-mode="one_time"').replace('</article>', '<select name="quantity"><option value="1">1</option><option selected value="2">2</option></select><input type="hidden" name="ASIN" value="B0FIXTURE1"><input type="hidden" name="csrfToken" value="SECRET_CSRF"></article>');
+    const result = await provider.read('checkout_get', { url }, ctx);
+    expect(result).toMatchObject({ status: 'partial', data: { executableTerms: false, sections: { items: [{
+      publicIdentity: [{ source: 'data-asin', asin: 'B0FIXTURE1' }, { source: 'public_asin_input', asin: 'B0FIXTURE1' }],
+      explicitEnumObservations: [{ source: 'data-condition', value: 'New' }, { source: 'data-purchase-mode', value: 'one_time' }],
+      quantityObservations: [{ source: 'selected_quantity_option', quantity: 2 }],
+      offerTokenHashes: [{ source: 'offeringID', asin: 'B0FIXTURE1', sha256: createHash('sha256').update('SECRET_OFFER').digest('hex') }],
+    }] } } });
+    expect(JSON.stringify(result)).not.toMatch(/SECRET_|csrfToken/); expect(submissions).toBe(0);
+  });
+  it('observes structured state paths and types only while excluding unknown keys and all JSON values', async () => {
+    html = html.replace('</article>', '<script type="a-state" data-a-state=\'{"key":"checkoutState"}\'>{"items":[{"asin":"SECRET_ASIN","condition":"SECRET_CONDITION","purchaseMode":"SECRET_MODE","quantity":7,"offeringID":"SECRET_OFFERING","unknownSecretKey":"SECRET_UNKNOWN","payment":{"cardNumber":"4111111111111111","cvv":"987"}}],"csrfToken":"SECRET_TOKEN"}</script></article>');
+    const result = await provider.read('checkout_get', { url }, ctx);
+    expect(result).toMatchObject({ data: { sections: { structuredState: [{ stateKey: 'checkoutState', itemId: 'checkout-item-block-0', fields: [
+      { path: 'items[].asin', type: 'string' }, { path: 'items[].condition', type: 'string' }, { path: 'items[].purchaseMode', type: 'string' }, { path: 'items[].quantity', type: 'number' }, { path: 'items[].offeringID', type: 'string' },
+    ] }] } } });
+    expect(JSON.stringify(result)).not.toMatch(/SECRET_|unknownSecretKey|cardNumber|cvv|csrfToken|4111111111111111|987/);
+  });
+  it('does not infer item values from JSON, unrecognized enums, unrelated inputs or hidden templates', async () => {
+    html = html.replace(/<a href="https:\/\/www.amazon.com\/dp\/[^>]+>Fixture cable<\/a>/, '<span>Fixture cable</span>').replace('id="checkout-item-block-0"', 'id="checkout-item-block-0" data-condition="SECRET_UNKNOWN" data-purchase-mode="standard"').replace('</article>', '<div style="display:none"><input name="ASIN" value="B0HIDDEN01"><input name="offeringID" value="SECRET_HIDDEN_OFFER"></div><input type="hidden" name="quantity" value="1"><script type="application/json">{"asin":"B0FIXTURE1","condition":"New","purchaseMode":"one_time"}</script></article>');
+    const result = await provider.read('checkout_get', { url }, ctx);
+    const item = (result.data as {sections:{items:Record<string,unknown>[]}}).sections.items[0]!;
+    expect(item.publicIdentity).toBeUndefined(); expect(item.explicitEnumObservations).toBeUndefined(); expect(item.quantityObservations).toBeUndefined(); expect(item.offerTokenHashes).toBeUndefined();
+    expect(JSON.stringify(result)).not.toMatch(/SECRET_|B0HIDDEN01/);
+  });
+  it('withholds offer binding on ambiguous public item identity and excludes structured hidden templates', async () => {
+    html = html.replace('id="checkout-item-block-0"', 'id="checkout-item-block-0" data-asin="B0OTHER001"').replace('</article>', '<div style="display:none"><script type="application/json">{"tax":1,"condition":"SECRET_HIDDEN_STATE"}</script></div></article>');
+    const result = await provider.read('checkout_get', { url }, ctx);
+    expect((result.data as {sections:{items:Record<string,unknown>[],structuredState:unknown[]}}).sections.items[0]!.offerTokenHashes).toBeUndefined();
+    expect((result.data as {sections:{structuredState:unknown[]}}).sections.structuredState).toEqual([]);
+    expect(JSON.stringify(result)).not.toContain('SECRET_HIDDEN_STATE');
+  });
+  it('observes gift-card credit and gross/net totals without treating credit as a discount or synthesizing missing fields', async () => {
+    html = html.replace('<div>Order total: $26.40</div>', '<div>Total: $26.40</div><div>Gift Card:</div><div>-$26.40</div><div>Order total: $0.00</div>').replace('Visa ending in 4242', 'Gift card balance applied').replace('<div>Discount: $0.00</div>', '');
+    const result = await provider.read('checkout_get', { url }, ctx);
+    expect(result).toMatchObject({ status: 'partial', data: { executableTerms: false, sections: { totals: { giftCardCredits: [{ label: 'Gift Card', value: '-$26.40' }] }, payment: { complete: false, giftCardCreditObserved: true, source: 'displayed_totals_gift_card_line' } } } });
+    expect(JSON.stringify(result)).not.toContain('Discount');
+    expect((result.data as {sections:{totals:{labelValues:unknown[]}}}).sections.totals.labelValues).toContainEqual({ label: 'Order total', value: '$0.00' });
   });
 });

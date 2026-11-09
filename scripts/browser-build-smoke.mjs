@@ -48,12 +48,20 @@ try {
   assert.equal(reconciledAddress.status, 'ok');
   addressSelectionSmoke = false;
   html = '<span id="nav-link-accountList-nav-line-1">Hello, Fixture</span>' + await readFile(new URL('../tests/fixtures/checkout-review-modern-diagnostics.html', import.meta.url), 'utf8');
+  html = html.replace('id="checkout-item-block-0"', 'id="checkout-item-block-0" data-asin="B0FIXTURE1" data-condition="New" data-purchase-mode="one_time"')
+    .replace('</article>', '<select name="quantity"><option selected value="2">2</option></select><script type="application/json">{"condition":"SECRET_STATE","quantity":2,"csrfToken":"SECRET_TOKEN"}</script></article>')
+    .replace('<div>Order total: $26.40</div>', '<div>Total: $26.40</div><div>Gift Card: -$26.40</div><div>Order total: $0.00</div>');
   const modernReviewDiagnostic = await provider.read('checkout_get', { url: 'https://www.amazon.com/checkout/p/p-123-1111111-2222222/spc?isBuyNow=1&pipelineType=Chewbacca&hasWorkingJavascript=1' }, addressContext);
   assert.equal(modernReviewDiagnostic.status, 'partial', 'Modern review read never emits executable terms');
   assert.equal(modernReviewDiagnostic.data.diagnosticOnly, true);
   assert.equal(modernReviewDiagnostic.data.executableTerms, false);
   assert.equal(modernReviewDiagnostic.data.sections.items[0].links[0].asin, 'B0FIXTURE1');
   assert.equal(modernReviewDiagnostic.data.sections.payment.lastFour, '4242');
+  assert.equal(modernReviewDiagnostic.data.sections.items[0].publicIdentity[0].asin, 'B0FIXTURE1');
+  assert.equal(modernReviewDiagnostic.data.sections.items[0].quantityObservations[0].quantity, 2);
+  assert.match(modernReviewDiagnostic.data.sections.items[0].offerTokenHashes[0].sha256, /^[a-f0-9]{64}$/);
+  assert.equal(modernReviewDiagnostic.data.sections.structuredState[0].fields[0].path, 'condition');
+  assert.equal(modernReviewDiagnostic.data.sections.totals.giftCardCredits[0].value, '-$26.40');
   assert.doesNotMatch(JSON.stringify(modernReviewDiagnostic), /SECRET_|FULL_CARD_PRIVATE|OUTSIDE_PRIVATE_TEXT|4111/);
   for (const [kind, fixture, collection] of [
     ["cart_get", "cart.html", "lines"],
