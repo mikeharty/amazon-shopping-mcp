@@ -361,8 +361,30 @@ async function readLock(lockDir: string): Promise<LockRecord | undefined> {
 }
 
 export async function classifyPage(page: Page): Promise<PageState> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const startingURL = page.url();
+    try {
+      const state = await classifyCurrentPage(page);
+      if (page.url() === startingURL) return state;
+    } catch (error) {
+      if (!(error instanceof Error) || !/execution context was destroyed|cannot find context|frame was detached/i.test(error.message)) throw error;
+      await page.waitForLoadState('domcontentloaded', {timeout: 2_000}).catch(() => undefined);
+    }
+  }
+  return {kind:'challenge',challenge:'unknown',url:page.url(),message:'The page changed during verification; automation is paused until its state can be verified'};
+}
+
+async function classifyCurrentPage(page: Page): Promise<PageState> {
   const url = page.url();
   const title = (await page.title().catch(() => "")).toLowerCase();
+  const location = new URL(url);
+  const checkpointRoute = location.origin === 'https://www.amazon.com' && /^\/checkpoint\/(?:continue|validate)(?:\/|$)/.test(location.pathname);
+  const checkpointForm = await page.locator('form#checkpointForm').evaluateAll((forms) => forms.some((form) => {
+    const element = form as HTMLFormElement;
+    const action = new URL(element.action, window.location.href);
+    return element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden' && action.origin === 'https://www.amazon.com' && action.pathname === '/checkpoint/validate' && Boolean(element.querySelector('input[type="checkbox"][name="continueCheck"]'));
+  }));
+  if (checkpointRoute || checkpointForm) return { kind: 'challenge', challenge: 'robot_check', url, message: 'Complete the I am human checkpoint in the visible dedicated Amazon browser; automation is paused' };
   if (/\/ap\/signin|\/ap\/mfa/.test(url)) {
     const challenge: ChallengeKind = url.includes("/mfa") ? "mfa" : "signin";
     return {

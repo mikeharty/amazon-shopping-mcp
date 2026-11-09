@@ -3,12 +3,22 @@ import { z } from "zod";
 export const purchasePreparationKinds = ["checkout_prepare", "buy_now_prepare", "subscriptions_prepare"] as const;
 export const purchaseCommitKinds = ["checkout_submit", "subscriptions_submit"] as const;
 
+export function isModernReviewUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.origin === "https://www.amazon.com" && !url.username && !url.password && !url.hash &&
+      /^\/checkout\/p\/p-\d{3}-\d{7}-\d{7}\/spc$/.test(url.pathname) &&
+      [...url.searchParams.keys()].every((key) => ["ref", "ref_", "referrer", "pipelineType", "isBuyNow", "hasWorkingJavascript", "purchaseId", "checkoutSessionId"].includes(key) && url.searchParams.getAll(key).length === 1);
+  } catch { return false; }
+}
+
 export function isReviewUrl(value: string): boolean {
+  if (isModernReviewUrl(value)) return true;
   try {
     const url = new URL(value);
     return url.origin === "https://www.amazon.com" && !url.username && !url.password && !url.hash &&
       (/^\/checkout\/p\/(?:p-[A-Za-z0-9-]+\/)?(?:review|spc)$/.test(url.pathname) || url.pathname === "/gp/buy/spc/handlers/display.html") &&
-      [...url.searchParams.keys()].every((key) => ["ref", "ref_", "pipelineType", "hasWorkingJavascript", "purchaseId", "checkoutSessionId"].includes(key));
+      [...url.searchParams.keys()].every((key) => ["ref", "ref_", "pipelineType", "hasWorkingJavascript", "purchaseId", "checkoutSessionId"].includes(key) && url.searchParams.getAll(key).length === 1);
   } catch { return false; }
 }
 

@@ -147,29 +147,39 @@ Shipping eligibility, tax, delivery and total may change with the destination.
 
 ## Modern checkout evidence and gift-card funding
 
-Modern `/checkout/p/p-…/spc` pages can be inspected through `checkout_get`
-with a fresh account authentication check. The current modern reader returns
-filtered diagnostic evidence only: selected delivery labels, displayed charge
-rows, public item identity where observed, and bounded metadata for unsupported
-item controls. It does not create executable purchase terms or an approval intent. Its
-`manual_checkout_review` action preserves the validated full Amazon checkout URL
-for direct human completion; it is not an MCP approval link or an automatic
-submission. Reconcile actual order state afterward before attempting any new
-purchase. A per-call, bounded response observer can report sanitized endpoint
-metadata for unsupported layouts; it reads no payloads or credentials and replays
-no requests.
-Missing condition, purchase mode, or item identity must not be filled from the
-requested purchase. Legacy supported review adapters retain their existing
-execution contract.
+Modern `/checkout/p/p-…/spc` pages support a bounded one-item, New,
+one-time Buy It Now profile with fully applied gift-card funding. Preparation
+must begin through the observed native regular/New product form. The provider
+records that actual navigation in memory, binds the resulting checkout and line
+identity, and expires the proof after fifteen minutes. Request fields, a previous
+checkout URL, or missing review fields cannot establish that proof. Restart,
+challenge, session changes, contradictory terms, unrelated mutations, and an
+attempted final dispatch invalidate it. Saved-address selection through the MCP
+can continue the same preparation.
 
-Purchase terms can represent one-time gift-card funding separately from the
-purchase price. `total` remains the gross purchase amount after discounts;
-`funding.giftCardApplied` plus `funding.additionalAmountDue` must equal that total.
-Gift-card balance is payment, not a discount. The owner review displays all three
-amounts, and the complete funding object is included in the existing exact-term
-digest. Legacy terms receive no default funding fields. Recurring funded terms
-are unsupported. This model and display do not establish that a live checkout
-adapter can extract or independently verify funded purchases.
+`checkout_get` reports executable terms only when that fresh preparation proof
+and the complete review agree. Other modern layouts retain diagnostic-only
+inspection. No unsupported checkout can become executable through owner approval.
+The adapter requires the exact item, seller, quantity, unit price, complete US
+destination, delivery selection, and every charge and funding row. It rechecks
+them before a single native order-form submission.
+
+`total` is the gross purchase amount after discounts; gift-card payment is not a
+discount. `funding.giftCardApplied` plus `funding.additionalAmountDue` must equal
+that total. The owner review displays all three amounts and includes the entire
+funding object in the approval digest. Legacy terms receive no default funding
+fields. Recurring funded purchases and partially funded modern purchases are
+unsupported.
+
+Success requires a new confirmation identity absent from the pre-submit order
+history and an independent authenticated order-details read matching the item,
+seller, quantity, price, gross total, and funding. When the receipt omits quantity,
+a single line can establish it through exact item-subtotal/per-unit-price cents.
+Condition and one-time mode remain explicitly identified as pre-submit evidence
+when the receipt omits them. An incomplete or contradictory receipt after dispatch
+returns nonretryable uncertainty and quarantines the account; it never triggers a
+second submission. These modern contracts have synthetic and compiled-browser
+coverage. Live purchase verification remains a separate outcome.
 
 ## Cart checkout
 

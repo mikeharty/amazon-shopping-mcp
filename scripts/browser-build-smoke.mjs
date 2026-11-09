@@ -5,6 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAmazonWebProvider } from "../dist/packages/providers/amazon-web/index.js";
 import { assistAmazonPasswordLogin } from "../dist/packages/browser-runtime/password-login.js";
+import { extractModernReviewFacts } from '../dist/packages/providers/amazon-web/checkout/modern-review-facts.js';
+import { getModernOrderControl } from '../dist/packages/providers/amazon-web/checkout/modern-order-control.js';
+import { readModernOrderDetails, deriveModernReceiptQuantity } from '../dist/packages/providers/amazon-web/checkout/modern-order-details.js';
+import { modernReceiptAmounts } from '../dist/packages/providers/amazon-web/checkout/modern-receipt-verification.js';
+import { readModernConfirmation } from '../dist/packages/providers/amazon-web/checkout/modern-confirmation.js';
 
 // Exercise the JavaScript actually used by worker/login commands. Transpiler
 // helpers captured in page.evaluate callbacks can pass Vitest yet fail in Chrome.
@@ -67,6 +72,38 @@ try {
   assert.equal(modernReviewDiagnostic.data.sections.structuredState[0].fields[0].path, 'condition');
   assert.equal(modernReviewDiagnostic.data.sections.totals.giftCardCredits[0].value, '-$26.40');
   assert.doesNotMatch(JSON.stringify(modernReviewDiagnostic), /SECRET_|FULL_CARD_PRIVATE|OUTSIDE_PRIVATE_TEXT|4111/);
+  const nativeReviewURL = 'https://www.amazon.com/checkout/p/p-123-1111111-2222222/spc?pipelineType=Chewbacca&isBuyNow=1';
+  html = await readFile(new URL('../tests/fixtures/modern-review-facts.html', import.meta.url), 'utf8');
+  const nativeForm = '<section id="checkout-pyo-button-block"><form method="post" action="/checkout/p/p-123-1111111-2222222/spc/place-order?pipelineType=Chewbacca&amp;isBuyNow=1&amp;referrer=spc&amp;ref_=fixture"><input type="hidden" name="anti-csrftoken-a2z" value="PRIVATE_CSRF"><input type="hidden" name="consistencyToken" value="PRIVATE_CONSISTENCY"><input type="hidden" name="hasWorkingJavascript" value="1"><input id="placeOrder" name="placeYourOrder1" type="submit" value="Place your order"><input disabled id="placeOrder" name="placeYourOrder1" type="submit" value="Place your order"><input hidden disabled id="placeOrder" name="placeYourOrder1" type="submit" value="Place your order"></form></section>';
+  html = html.replace('</main>', nativeForm + '</main>');
+  await runtime.run(async page => {
+    await page.goto(nativeReviewURL);
+    const facts = await extractModernReviewFacts(page, nativeReviewURL);
+    assert.ok(facts); assert.equal(facts.line.asin, 'B0FIXTURE1');
+    assert.equal(facts.line.quantity, 1); assert.equal(facts.totals.total.minorUnits, 823);
+    assert.equal(facts.totals.funding.giftCardApplied.minorUnits, 823);
+    assert.match(facts.line.lineIdentityHash, /^[a-f0-9]{64}$/);
+    assert.doesNotMatch(JSON.stringify(facts), /PRIVATE_/);
+    assert.ok(await getModernOrderControl(page, nativeReviewURL));
+  });
+  html = await readFile(new URL('../tests/fixtures/modern-order-details.html', import.meta.url), 'utf8');
+  html = html.replace('<div id="od-subtotals">', '<div id="od-subtotals"><div class="od-line-item-row"><div class="od-line-item-row-label">Gift Card:</div><div class="od-line-item-row-content">-$8.23</div></div>');
+  await runtime.run(async page => {
+    await page.goto('https://www.amazon.com/gp/your-account/order-details?orderID=123-1111111-2222222');
+    const receipt = await readModernOrderDetails(page, '123-1111111-2222222');
+    assert.ok(receipt); assert.equal(receipt.line.asin, 'B0FIXTURE1');
+    assert.equal(deriveModernReceiptQuantity(receipt).quantity, 1);
+    assert.equal(modernReceiptAmounts(receipt.monetaryRows).funding.giftCardApplied.minorUnits, 823);
+    assert.equal(receipt.line.condition, undefined);
+    assert.doesNotMatch(JSON.stringify(receipt), /PRIVATE_/);
+  });
+  html = '<main id="order-confirmation"><h1>Order placed, thanks!</h1><a href="/gp/your-account/order-details?orderID=123-1111111-2222222">Order details</a></main>';
+  await runtime.run(async page => {
+    await page.goto('https://www.amazon.com/checkout/p/p-123-1111111-2222222/thankyou');
+    const confirmation = await readModernConfirmation(page, nativeReviewURL, new Set());
+    assert.equal(confirmation.orderId, '123-1111111-2222222');
+    assert.equal(await readModernConfirmation(page, nativeReviewURL, new Set(['123-1111111-2222222'])), undefined);
+  });
   for (const [kind, fixture, collection] of [
     ["cart_get", "cart.html", "lines"],
     ["orders_list", "orders.html", "orders"],

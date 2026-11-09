@@ -15,7 +15,9 @@ import { extractCheckout, prepareCheckout } from "./checkout/index.js";
 import { buyingOptions, preparePurchase, readCheckoutAddresses, readPurchasePreconditions, submitPurchase } from "./checkout/purchasing.js";
 import { reconcileCurrentAddress, selectCheckoutAddress } from "./checkout/addresses.js";
 import { isModernReviewCandidate, readModernReviewDiagnostics } from "./checkout/review-diagnostics.js";
-import { purchaseCommitKinds } from "../../core/purchasing.js";
+import { isModernReviewUrl, purchaseCommitKinds } from "../../core/purchasing.js";
+import { ModernCheckoutOrigins } from './checkout/modern-origins.js';
+import { modernCheckoutSnapshot } from './checkout/modern-purchase.js';
 import {
   extractCategory,
   extractMedia,
@@ -83,7 +85,21 @@ type Runner = {
 };
 
 export class AmazonWebProvider implements ShoppingProvider {
-  constructor(private readonly runner: Runner) {}
+  private readonly modernOrigins: ModernCheckoutOrigins;
+  constructor(private readonly runner: Runner, modernClock: () => number = Date.now) { this.modernOrigins = new ModernCheckoutOrigins(modernClock); }
+  private modernResult(context: ProviderContext, result: Result): Result {
+    if (result.status === 'outcome_unknown' || (result.status === 'requires_user_action' && result.error?.code !== 'checkout_address_selection_required')) this.modernOrigins.invalidate(context);
+    return result;
+  }
+  private runModern(context: ProviderContext, kind: string, work: (page: Page) => Promise<Result>, mutation = false): Promise<Result> {
+    return this.runner.run(async (page) => {
+      this.modernOrigins.enterSession(context);
+      if (this.runner.sessionGeneration !== undefined && this.runner.sessionGeneration !== context.sessionGeneration) { this.modernOrigins.invalidate(context); return staleSession(this.runner.sessionGeneration); }
+      if (mutation ? kind !== 'checkout_address_select' && kind !== 'checkout_submit' : kind === 'purchase_buy_now_prepare' || kind === 'purchase_subscriptions_prepare' || (this.modernOrigins.awaitingAddress(context) && kind !== 'checkout_addresses_get')) this.modernOrigins.invalidate(context);
+      try { return this.modernResult(context, await work(page)); }
+      catch (error) { this.modernOrigins.invalidate(context); throw error; }
+    });
+  }
 
   async read(
     kind: string,
@@ -91,17 +107,20 @@ export class AmazonWebProvider implements ShoppingProvider {
     context: ProviderContext,
   ): Promise<Result> {
     if (["checkout_addresses_get", "buying_options_get", "purchase_checkout_prepare", "purchase_buy_now_prepare", "purchase_subscriptions_prepare", "checkout_submit_preconditions", "subscriptions_submit_preconditions"].includes(kind)) {
-      if (this.runner.sessionGeneration !== undefined && this.runner.sessionGeneration !== context.sessionGeneration)
+      if (this.runner.sessionGeneration !== undefined && this.runner.sessionGeneration !== context.sessionGeneration) {
+        this.modernOrigins.invalidate(context);
         return staleSession(this.runner.sessionGeneration);
+      }
       try {
-        return await this.runner.run(async (page) => {
+        return await this.runModern(context, kind, async (page): Promise<Result> => {
+          if (kind === 'purchase_checkout_prepare' && !(typeof input.url === 'string' && isModernReviewUrl(input.url) && this.modernOrigins.get(context, input.url)?.stage === 'review')) this.modernOrigins.invalidate(context);
           if (kind === "buying_options_get") return buyingOptions(page, input.asin);
           if (kind === "checkout_addresses_get") {
             if (input.inspectCurrent === true && input.reconcileCurrent === true) return { status: 'unsupported', error: { code: 'incompatible_address_read_modes', retryable: false } };
             return input.reconcileCurrent === true ? reconcileCurrentAddress(page, input, context) : readCheckoutAddresses(page, input, context);
           }
-          if (kind.endsWith("_preconditions")) return readPurchasePreconditions(page, input);
-          return preparePurchase(page, kind.slice("purchase_".length), input, context);
+          if (kind.endsWith("_preconditions")) return readPurchasePreconditions(page, input, context, this.modernOrigins);
+          return preparePurchase(page, kind.slice("purchase_".length), input, context, this.modernOrigins);
         });
       } catch (error) { return mapError(error); }
     }
@@ -115,10 +134,13 @@ export class AmazonWebProvider implements ShoppingProvider {
       this.runner.sessionGeneration !== undefined &&
       this.runner.sessionGeneration !== context.sessionGeneration
     )
-      return staleSession(this.runner.sessionGeneration);
+      { this.modernOrigins.invalidate(context); return staleSession(this.runner.sessionGeneration); }
     try {
-      return await this.runner.run(async (page) => {
-        if (kind === 'checkout_get' && isModernReviewCandidate(input.url)) return readModernReviewDiagnostics(page, input.url, context);
+      return await this.runModern(context, kind, async (page): Promise<Result> => {
+        if (kind === 'checkout_get' && isModernReviewCandidate(input.url)) {
+          if (typeof input.url === 'string' && isModernReviewUrl(input.url) && this.modernOrigins.get(context, input.url)?.stage === 'review') return modernCheckoutSnapshot(page, input.url, context, this.modernOrigins);
+          return readModernReviewDiagnostics(page, input.url, context);
+        }
         const target = readTarget(kind, input);
         if (target) {
           await page.goto(target, {
@@ -286,11 +308,19 @@ export class AmazonWebProvider implements ShoppingProvider {
       this.runner.sessionGeneration !== undefined &&
       this.runner.sessionGeneration !== context.sessionGeneration
     )
-      return staleSession(this.runner.sessionGeneration);
+      { this.modernOrigins.invalidate(context); return staleSession(this.runner.sessionGeneration); }
     try {
-      return await this.runner.run(async (page) => {
-        if ((purchaseCommitKinds as readonly string[]).includes(kind)) return submitPurchase(page, kind, terms, context);
-        if (kind === 'checkout_address_select') return selectCheckoutAddress(page, terms, context);
+      return await this.runModern(context, kind, async (page): Promise<Result> => {
+        if ((purchaseCommitKinds as readonly string[]).includes(kind)) return submitPurchase(page, kind, terms, context, this.modernOrigins);
+        if (kind === 'checkout_address_select') {
+          const origin = typeof terms.url === 'string' ? this.modernOrigins.get(context, terms.url) : undefined;
+          const result = await selectCheckoutAddress(page, terms, context);
+          if (origin && result.status === 'ok') {
+            const applied = (result.data as { appliedAddress?: { checkoutUrl?: string } } | undefined)?.appliedAddress;
+            if (typeof terms.url !== 'string' || typeof applied?.checkoutUrl !== 'string' || !this.modernOrigins.completeAddressContinuation(context, terms.url, applied.checkoutUrl)) this.modernOrigins.invalidate(context);
+          } else if (origin && result.status !== 'ok') this.modernOrigins.invalidate(context);
+          return result;
+        }
         if (kind === "cart_add") return this.addToCart(page, terms, context);
         await gotoAndCheck(page, "https://www.amazon.com/gp/cart/view.html");
         const before = await extractCart(page);
@@ -369,14 +399,15 @@ export class AmazonWebProvider implements ShoppingProvider {
           if (dispatched) return unknown(kind);
           throw error;
         }
-      });
+      }, true);
     } catch (error) {
       return mapError(error);
     }
   }
 
   async close(): Promise<void> {
-    await this.runner.close();
+    this.modernOrigins.clear();
+    try { await this.runner.close(); } finally { this.modernOrigins.clear(); }
   }
 
   private async addToCart(

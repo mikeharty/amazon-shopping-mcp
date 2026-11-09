@@ -2,6 +2,18 @@
 
 Review target: `v0.3.0-alpha`, prepared October 10, 2026 (America/Los_Angeles).
 
+## November 9 modern checkout correction
+
+The modern one-item, New, one-time, fully gift-funded adapter passed local
+verification with isolated Postgres enabled: typecheck, 782 tests in 41 files,
+production build, and compiled Chromium fixture checks. A subsequent serialized
+preparation invalidation correction passed the 34-test provenance suite; the
+final typecheck, rebuild, and compiled checks were repeated. The profile requires
+fresh native product-form preparation, immutable in-memory checkout provenance,
+exact-term owner approval, one dispatch, and a new independently verified receipt.
+Unsupported layouts and uncertain effects remain explicit. These results are
+synthetic local evidence; live account and CI outcomes are recorded separately.
+
 ## Version 0.3.0 local verification
 
 Local verification on Node 26.10.0 passed typecheck, **221 tests in 22 files**

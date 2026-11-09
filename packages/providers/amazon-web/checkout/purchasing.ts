@@ -1,7 +1,7 @@
 import type { Locator, Page } from "playwright";
 import type { ProviderContext, Result } from "../../../contracts/index.js";
 import { BrowserRuntimeError, classifyPage, isVerifiedAuthenticatedAmazonPage } from "../../../browser-runtime/index.js";
-import { commitKindFor, isReviewUrl, purchaseTermsSchema, type PurchaseTerms } from "../../../core/purchasing.js";
+import { commitKindFor, isModernReviewUrl, isReviewUrl, purchaseTermsSchema, type PurchaseTerms } from "../../../core/purchasing.js";
 import { digest } from "../../../store/crypto.js";
 import { extractCart } from "../cart/index.js";
 import { extractOrder, extractOrders } from "../orders/index.js";
@@ -9,6 +9,11 @@ import { extractSubscriptions } from "../subscriptions/index.js";
 import { money } from "../types.js";
 import { extractCheckout } from "./index.js";
 import { shippingIdentity } from "./address-identity.js";
+import { getModernProductOffer, enterModernProductCheckout } from './modern-product-offer.js';
+import { ModernCheckoutOrigins } from './modern-origins.js';
+import { loadModernPurchaseQuote } from './modern-purchase.js';
+import { getModernOrderControl } from './modern-order-control.js';
+import { submitModernPurchase } from './modern-submit.js';
 
 const unsupported = (code: string, missing?: string[]): Result => ({ status: "unsupported", error: { code, retryable: false }, ...(missing ? { coverage: { complete: false, missing } } : {}) });
 const conflict = (code: string): Result => ({ status: "conflict", error: { code, retryable: false } });
@@ -272,7 +277,9 @@ export async function readCheckoutAddresses(page: Page, input: Record<string, un
 export async function buyingOptions(page: Page, asin: unknown): Promise<Result> {
   if (typeof asin !== "string" || !/^[A-Z0-9]{10}$/.test(asin)) return unsupported("invalid_asin");
   await navigate(page, `https://www.amazon.com/dp/${asin}`);
-  const data = await inspectProduct(page);
+  const legacy = await inspectProduct(page);
+  const native = await getModernProductOffer(page);
+  const data = native && native.offer.asin === legacy.asin ? { ...legacy, sellerId: native.offer.sellerId, condition: native.offer.condition, modes: [{ mode: native.offer.purchaseMode, selected: true }], nativeOfferEvidence: { source: native.offer.evidenceSource, offerTokenHash: native.offer.offerTokenHash, unitPrice: native.offer.unitPrice, quantity: native.offer.quantity } } : legacy;
   if (data.asin !== asin) return conflict("wrong_product_identity");
   return { status: "ok", data, observation: { source: "amazon-web", observedAt: new Date().toISOString(), contextRef: "product", authentication: "verified" } };
 }
@@ -360,11 +367,18 @@ async function reviewControl(control: Locator, requiredPath?: string): Promise<b
   }, requiredPath);
 }
 
-export async function preparePurchase(page: Page, kind: string, input: Record<string, unknown>, context: ProviderContext): Promise<Result> {
+export async function preparePurchase(page: Page, kind: string, input: Record<string, unknown>, context: ProviderContext, modernOrigins?: ModernCheckoutOrigins): Promise<Result> {
   let flow: PurchaseTerms["flow"] = "cart";
   if (kind === "checkout_prepare") {
     if (input.url !== undefined) {
       if (typeof input.url !== "string" || !isReviewUrl(input.url)) return unsupported("invalid_review_url");
+      if (isModernReviewUrl(input.url)) {
+        if (!modernOrigins) return unsupported('modern_checkout_origin_required');
+        const quote = await loadModernPurchaseQuote(page, input.url, context, modernOrigins);
+        if (quote.status !== 'ok') return quote;
+        if (digest(quote.data) !== input.expectedRevision) return conflict('stale_checkout');
+        return { ...quote, data: { purchaseTerms: quote.data, commitKind: 'checkout_submit' } };
+      }
       await navigate(page, input.url);
       if ((await extractCheckout(page)).revision !== input.expectedRevision) return conflict("stale_checkout");
     } else {
@@ -382,6 +396,17 @@ export async function preparePurchase(page: Page, kind: string, input: Record<st
     flow = kind === "subscriptions_prepare" ? "subscribe_and_save" : "buy_now";
     const options = await buyingOptions(page, input.asin);
     if (options.status !== "ok") return options;
+    if (flow === 'buy_now' && await page.locator('form#addToCart input#buy-now-button[name="submit.buy-now"], #buyNow_regular_offerActions_new_feature_div').count()) {
+      if (!modernOrigins) return unsupported('modern_checkout_origin_required');
+      const selected = await getModernProductOffer(page);
+      if (!selected) return unsupported('modern_native_offer_unverified');
+      if (input.quantity !== 1 || input.asin !== selected.offer.asin || input.expectedSellerId !== selected.offer.sellerId || input.expectedCondition !== selected.offer.condition) return conflict('offer_changed');
+      const entered = await enterModernProductCheckout(page, selected.offer);
+      if (!entered || !modernOrigins.recordNativeEntry(context, entered)) return unsupported('modern_native_entry_unverified');
+      if (isAddressStepUrl(entered.checkoutURL)) return { status: 'requires_user_action', error: { code: 'checkout_address_selection_required', retryable: false }, action: { kind: 'checkout_address_selection', url: canonicalAddressUrl(entered.checkoutURL) } };
+      const quote = await loadModernPurchaseQuote(page, entered.checkoutURL, context, modernOrigins);
+      return quote.status === 'ok' ? { ...quote, data: { purchaseTerms: quote.data, commitKind: 'checkout_submit' } } : quote;
+    }
     const requestedMode = flow === "buy_now" ? "one_time" : "subscribe_and_save";
     const mode = page.locator(`[data-purchase-mode="${requestedMode}"] input[type="radio"], ${flow === "buy_now" ? "#onetimePurchase" : "#subscribeAndSave"} input[type="radio"]`);
     if (await mode.count() === 1) await mode.check({ timeout: 5_000 });
@@ -501,6 +526,7 @@ function maskPayment(value?: string) {
 }
 
 async function finalControl(page: Page, terms: PurchaseTerms): Promise<Locator | undefined> {
+  if (isModernReviewUrl(terms.reviewUrl)) return getModernOrderControl(page, terms.reviewUrl);
   const controls = page.locator('#placeYourOrder input[type="submit"], input[name="placeYourOrder1"], #place-your-order-button, #sns-confirm-button');
   const visible: Locator[] = [];
   for (let index = 0; index < await controls.count(); index++) if (await controls.nth(index).isVisible()) visible.push(controls.nth(index));
@@ -521,17 +547,22 @@ async function finalControl(page: Page, terms: PurchaseTerms): Promise<Locator |
   return valid ? visible[0] : undefined;
 }
 
-export async function readPurchasePreconditions(page: Page, input: Record<string, unknown>): Promise<Result> {
+export async function readPurchasePreconditions(page: Page, input: Record<string, unknown>, context?: ProviderContext, modernOrigins?: ModernCheckoutOrigins): Promise<Result> {
   const parsed = purchaseTermsSchema.safeParse(input);
   if (!parsed.success) return unsupported("invalid_purchase_terms");
+  if (isModernReviewUrl(parsed.data.reviewUrl)) return context && modernOrigins ? loadModernPurchaseQuote(page, parsed.data.reviewUrl, context, modernOrigins) : unsupported('modern_checkout_origin_required');
   await navigate(page, parsed.data.reviewUrl);
   return purchaseQuote(page, parsed.data.flow);
 }
 
-export async function submitPurchase(page: Page, kind: string, input: Record<string, unknown>, context: ProviderContext): Promise<Result> {
+export async function submitPurchase(page: Page, kind: string, input: Record<string, unknown>, context: ProviderContext, modernOrigins?: ModernCheckoutOrigins): Promise<Result> {
   const parsed = purchaseTermsSchema.safeParse(input);
   if (!parsed.success || commitKindFor(parsed.data) !== kind) return unsupported("invalid_purchase_terms");
   const terms = parsed.data;
+  if (isModernReviewUrl(terms.reviewUrl)) {
+    if (!modernOrigins) return unsupported('modern_checkout_origin_required');
+    return submitModernPurchase(page, terms, context, modernOrigins);
+  }
   // Capture existing identities before dispatch; an old confirmation is never
   // sufficient proof of a new order or enrollment.
   await navigate(page, "https://www.amazon.com/gp/your-account/order-history");
