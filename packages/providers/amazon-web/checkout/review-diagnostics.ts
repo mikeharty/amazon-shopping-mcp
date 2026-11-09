@@ -1,4 +1,4 @@
-import type { Page } from 'playwright';
+import type { Page, Request, Response } from 'playwright';
 import type { ProviderContext, Result } from '../../../contracts/index.js';
 import { classifyPage, isVerifiedAuthenticatedAmazonPage } from '../../../browser-runtime/index.js';
 import { digest } from '../../../store/crypto.js';
@@ -25,13 +25,64 @@ async function hasAuthForm(page: Page): Promise<boolean> {
 const unsupported = (code: string): Result => ({ status: 'unsupported', error: { code, retryable: false } });
 const authRequired = (): Result => ({ status: 'requires_user_action', error: { code: 'checkout_authentication_unverified', retryable: false } });
 
+type NetworkMetadata = { path: string; queryKeys: string[]; resourceType: string; method: 'GET' | 'POST' | 'HEAD' | 'other'; status: number; contentClass: 'json' | 'html' | 'other' };
+/** Internal per-call observer. It does not initiate requests or read payloads. */
+export function observeReviewNetworkMetadata(page: Page, reviewUrl: string) {
+  const purchase = new URL(reviewUrl).pathname.split('/')[3];
+  const expected = new URL(reviewUrl);
+  const expectedPurchaseId = expected.searchParams.get('purchaseId');
+  const expectedSessionId = expected.searchParams.get('checkoutSessionId');
+  const pending = new Set<Request>(); const entries: NetworkMetadata[] = [];
+  let active = true;
+  const vocabulary = new Set('gp buy checkout p spc api ajax async data display html json get set select selected delivery shipping address destination payment pay order orders purchase line item items lineitem lineitems offer offers product products seller condition mode quantity detail details summary subtotal total totals tax discount gift card balance funding review render widget component panel state config configuration metadata load submit entry context handlers javascript'.split(' '));
+  const safePath = (path: string) => '/' + path.split('/').filter(Boolean).slice(0, 20).map((segment) => {
+    if (segment === purchase) return '[purchase]';
+    const words = segment.replace(/([A-Z])([A-Z][a-z])/g, '$1 $2').replace(/([a-z])([A-Z])/g, '$1 $2').split(/[ ._-]+/).map((word) => word.toLowerCase());
+    return /^[A-Za-z][A-Za-z._-]{0,59}$/.test(segment) && words.every((word) => vocabulary.has(word)) ? segment : '[segment]';
+  }).join('/');
+  const onRequest = (request: Request) => {
+    if (!active || pending.size >= 120 || entries.length >= 30) return;
+    try {
+      const url = new URL(request.url());
+      if (url.origin !== 'https://www.amazon.com' || url.username || url.password || request.frame() !== page.mainFrame() || !['document', 'xhr', 'fetch'].includes(request.resourceType())) return;
+      if ((url.pathname.match(/p-\d{3}-\d{7}-\d{7}/g) ?? []).some((id) => id !== purchase) || (url.pathname.includes('/checkout/p/') && !url.pathname.startsWith(`/checkout/p/${purchase}/`))) return;
+      // These two identity fields are compared only to reject foreign contexts;
+      // their values, and all other query values, never enter returned metadata.
+      const purchaseIds = url.searchParams.getAll('purchaseId'); const sessionIds = url.searchParams.getAll('checkoutSessionId');
+      if (purchaseIds.length > 1 || sessionIds.length > 1 || (purchaseIds.length === 1 && (expectedPurchaseId !== null ? purchaseIds[0] !== expectedPurchaseId : purchaseIds[0] !== purchase && purchaseIds[0] !== purchase?.slice(2))) || (sessionIds.length === 1 && (expectedSessionId === null || sessionIds[0] !== expectedSessionId))) return;
+      if (request.resourceType() === 'document' && (!validUrl(url.toString()) || routingIdentity(url.toString()) !== routingIdentity(reviewUrl))) return;
+      pending.add(request);
+    } catch { /* Non-frame and malformed requests are outside this observation. */ }
+  };
+  const onResponse = (response: Response) => {
+    if (!active || entries.length >= 30) return;
+    const request = response.request();
+    if (!pending.delete(request)) return;
+    try {
+      const url = new URL(request.url());
+      // Only Content-Type is accessed. No response payload, cookies or request headers.
+      const contentType = (response.headers()['content-type'] ?? '').split(';')[0]!.trim().toLowerCase();
+      const contentClass = contentType === 'application/json' || contentType.endsWith('+json') ? 'json' : ['text/html', 'application/xhtml+xml'].includes(contentType) ? 'html' : 'other';
+      const method = request.method();
+      entries.push({ path: safePath(url.pathname), queryKeys: [...new Set(url.searchParams.keys())].filter((key) => /^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/.test(key)).slice(0, 40), resourceType: request.resourceType(), method: method === 'GET' || method === 'POST' || method === 'HEAD' ? method : 'other', status: response.status(), contentClass });
+    } catch { /* Missing metadata never causes payload fallback. */ }
+  };
+  page.on('request', onRequest); page.on('response', onResponse);
+  return { close() { active = false; page.off('request', onRequest); page.off('response', onResponse); pending.clear(); return entries.map((entry) => ({ ...entry, queryKeys: [...entry.queryKeys] })); } };
+}
+
 /** Read evidence only. Never produces purchase terms, an intent, or a dispatch. */
 export async function readModernReviewDiagnostics(page: Page, value: unknown, context: ProviderContext): Promise<Result> {
   if (typeof value !== 'string' || !validUrl(value)) return unsupported('invalid_modern_review_url');
   // Authentication proof is fresh and local to this serialized provider operation.
   await page.goto('https://www.amazon.com/gp/your-account/order-history', { waitUntil: 'domcontentloaded', timeout: 30_000 });
   if (new URL(page.url()).origin !== 'https://www.amazon.com' || (await classifyPage(page)).kind !== 'ready' || !await isVerifiedAuthenticatedAmazonPage(page) || await hasAuthForm(page)) return authRequired();
+  const network = observeReviewNetworkMetadata(page, value);
+  let networkMetadata: NetworkMetadata[];
+  try {
   await page.goto(value, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  await page.waitForTimeout(750);
+  networkMetadata = network.close();
   if (!validUrl(page.url()) || routingIdentity(page.url()) !== routingIdentity(value)) return unsupported('modern_review_context_changed');
   if ((await classifyPage(page)).kind !== 'ready' || await hasAuthForm(page)) return authRequired();
   const raw = await page.evaluate(async () => {
@@ -314,10 +365,13 @@ export async function readModernReviewDiagnostics(page: Page, value: unknown, co
     return { items, structuredState, totals: { observedLines: totalLines, structure: structure(totalPanel), labelValues, ...(giftCardCredits.length ? { giftCardCredits } : {}) }, delivery, payment, finalControls };
   });
   if (!raw) return unsupported('modern_review_layout_unrecognized');
+  if (!validUrl(page.url()) || routingIdentity(page.url()) !== routingIdentity(value)) return unsupported('modern_review_context_changed');
+  if ((await classifyPage(page)).kind !== 'ready' || await hasAuthForm(page)) return authRequired();
   return {
     status: 'partial', data: { diagnosticOnly: true, executableTerms: false, contextFingerprint: digest({ routing: routingIdentity(page.url()), accountRef: context.accountRef, sessionGeneration: context.sessionGeneration }),
-      authenticationEvidence: 'same_run_account_page_and_modern_review', sections: raw, missing: ['executable_purchase_terms_not_extracted'] },
+      authenticationEvidence: 'same_run_account_page_and_modern_review', sections: raw, networkMetadata, missing: ['executable_purchase_terms_not_extracted'] },
     observation: { source: 'amazon-web', observedAt: new Date().toISOString(), contextRef: context.accountRef, authentication: 'verified' },
     coverage: { complete: false, missing: ['executable_purchase_terms_not_extracted'] },
   };
+  } finally { network.close(); }
 }
