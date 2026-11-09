@@ -8,7 +8,9 @@ The modern one-item, New, one-time, fully gift-funded adapter passed local
 verification with isolated Postgres enabled: typecheck, 782 tests in 41 files,
 production build, and compiled Chromium fixture checks. A subsequent serialized
 preparation invalidation correction passed the 34-test provenance suite; the
-final typecheck, rebuild, and compiled checks were repeated. The profile requires
+final typecheck, rebuild, and compiled checks were repeated. The native New
+marker also permits empty metadata wrappers while retaining explicit hidden and
+inactive checks; its expanded provenance suite passed 40 tests. The profile requires
 fresh native product-form preparation, immutable in-memory checkout provenance,
 exact-term owner approval, one dispatch, and a new independently verified receipt.
 Unsupported layouts and uncertain effects remain explicit. These results are

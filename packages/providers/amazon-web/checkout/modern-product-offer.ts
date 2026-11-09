@@ -85,6 +85,8 @@ export async function getModernProductOffer(
     const form = element.form;
     const row = element.closest(".accordion-atc-group-row");
     if (!row || !form.contains(row) || !visible(row)) return undefined;
+    // Metadata wrappers may have no layout box (for example display:contents).
+    // The native control and its offer row separately require positive visibility.
     const activeAncestors = (el: Element) => {
       for (let node: Element | null = el; node; node = node.parentElement) {
         const style = getComputedStyle(node);
@@ -94,8 +96,7 @@ export async function getModernProductOffer(
           ) ||
           style.display === "none" ||
           style.visibility === "hidden" ||
-          style.visibility === "collapse" ||
-          (node !== el && !visible(node))
+          style.visibility === "collapse"
         )
           return false;
         if (node === form) return true;

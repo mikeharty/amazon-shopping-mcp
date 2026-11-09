@@ -10,6 +10,7 @@ import { getModernOrderControl } from '../dist/packages/providers/amazon-web/che
 import { readModernOrderDetails, deriveModernReceiptQuantity } from '../dist/packages/providers/amazon-web/checkout/modern-order-details.js';
 import { modernReceiptAmounts } from '../dist/packages/providers/amazon-web/checkout/modern-receipt-verification.js';
 import { readModernConfirmation } from '../dist/packages/providers/amazon-web/checkout/modern-confirmation.js';
+import { getModernProductOffer } from '../dist/packages/providers/amazon-web/checkout/modern-product-offer.js';
 
 // Exercise the JavaScript actually used by worker/login commands. Transpiler
 // helpers captured in page.evaluate callbacks can pass Vitest yet fail in Chrome.
@@ -72,6 +73,15 @@ try {
   assert.equal(modernReviewDiagnostic.data.sections.structuredState[0].fields[0].path, 'condition');
   assert.equal(modernReviewDiagnostic.data.sections.totals.giftCardCredits[0].value, '-$26.40');
   assert.doesNotMatch(JSON.stringify(modernReviewDiagnostic), /SECRET_|FULL_CARD_PRIVATE|OUTSIDE_PRIVATE_TEXT|4111/);
+  html = await readFile(new URL('../tests/fixtures/modern-product-offer.html', import.meta.url), 'utf8');
+  await runtime.run(async page => {
+    await page.goto('https://www.amazon.com/dp/B0FIXTURE1');
+    const selected = await getModernProductOffer(page);
+    assert.ok(selected, 'Empty metadata wrappers retain explicit native New offer evidence');
+    assert.equal(selected.offer.condition, 'New');
+    assert.equal(selected.offer.purchaseMode, 'one_time');
+    assert.equal(selected.offer.unitPrice.minorUnits, 740);
+  });
   const nativeReviewURL = 'https://www.amazon.com/checkout/p/p-123-1111111-2222222/spc?pipelineType=Chewbacca&isBuyNow=1';
   html = await readFile(new URL('../tests/fixtures/modern-review-facts.html', import.meta.url), 'utf8');
   const nativeForm = '<section id="checkout-pyo-button-block"><form method="post" action="/checkout/p/p-123-1111111-2222222/spc/place-order?pipelineType=Chewbacca&amp;isBuyNow=1&amp;referrer=spc&amp;ref_=fixture"><input type="hidden" name="anti-csrftoken-a2z" value="PRIVATE_CSRF"><input type="hidden" name="consistencyToken" value="PRIVATE_CONSISTENCY"><input type="hidden" name="hasWorkingJavascript" value="1"><input id="placeOrder" name="placeYourOrder1" type="submit" value="Place your order"><input disabled id="placeOrder" name="placeYourOrder1" type="submit" value="Place your order"><input hidden disabled id="placeOrder" name="placeYourOrder1" type="submit" value="Place your order"></form></section>';

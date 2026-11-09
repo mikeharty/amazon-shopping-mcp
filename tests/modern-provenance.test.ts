@@ -167,6 +167,52 @@ describe("Volatile native-entry provenance for modern checkout", () => {
   async function prepare() {
     return provider.read("purchase_buy_now_prepare", request, ctx);
   }
+  it("accepts an active empty metadata wrapper without boxes while retaining visible row and control proof", async () => {
+    productHTML = productHTML.replace(
+      'class="accordion-atc-group-item"',
+      'class="accordion-atc-group-item" style="display:contents"',
+    );
+    const marker =
+      '<div id="buyNow_regular_offerActions_new_feature_div" data-feature-name="buyNow_regular_offerActions_new"></div>';
+    productHTML = productHTML.replace(
+      marker,
+      `<div class="fixture-metadata-inner" style="display:contents">${marker}</div>`,
+    );
+    await page.goto(pdp);
+    expect(
+      await page
+        .locator(".accordion-atc-group-item")
+        .evaluate((el) => el.getClientRects().length),
+    ).toBe(0);
+    expect(
+      await page
+        .locator(".fixture-metadata-inner")
+        .evaluate((el) => el.getClientRects().length),
+    ).toBe(0);
+    expect(await page.locator(".accordion-atc-group-row").isVisible()).toBe(
+      true,
+    );
+    expect(await page.locator("#buy-now-button").isVisible()).toBe(true);
+    expect(await getModernProductOffer(page)).toBeDefined();
+    expect(await prepare()).toMatchObject({ status: "ok" });
+    expect(nativePosts).toBe(1);
+    expect(finalPosts).toBe(0);
+  });
+  it.each([
+    "hidden",
+    'aria-hidden="true"',
+    'style="display:none"',
+    'style="visibility:hidden"',
+    'aria-selected="false"',
+  ])("rejects inactive metadata wrapper %s without entry", async (flags) => {
+    productHTML = productHTML.replace(
+      'class="accordion-atc-group-item"',
+      `class="accordion-atc-group-item" ${flags}`,
+    );
+    expect((await prepare()).status).not.toBe("ok");
+    expect(nativePosts).toBe(0);
+    expect(finalPosts).toBe(0);
+  });
   it("reports positive native New/selected-one-time options without clicking or creating origin", async () => {
     const options = await provider.read(
       "buying_options_get",
